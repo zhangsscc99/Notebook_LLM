@@ -875,6 +875,20 @@
             <a href="#s34">34 · 分层记忆和会话怎么记住</a>
           </div>
         </details>
+        <details class="toc-group" id="claudeWorkflowTocGroup">
+          <summary>
+            <span class="toc-group-title">claude code工作流编排</span>
+            <span class="toc-count">6 sections</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#claude-workflow-1">01 · 总体入口</a>
+            <a href="#claude-workflow-2">02 · QueryEngine 会话生命周期</a>
+            <a href="#claude-workflow-3">03 · query 主循环</a>
+            <a href="#claude-workflow-4">04 · 工具执行与权限</a>
+            <a href="#claude-workflow-5">05 · 子代理与后台任务</a>
+            <a href="#claude-workflow-6">06 · Coordinator 多 worker 编排</a>
+          </div>
+        </details>
         <details class="toc-group" id="toolsTocGroup">
           <summary>
             <span class="toc-group-title">OpenClaw Tools</span>
@@ -887,10 +901,11 @@
         <details class="toc-group" id="planningTocGroup">
           <summary>
             <span class="toc-group-title">OpenClaw Planning</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#planning-s1">01 · OpenClaw 是怎么进行工作流编排的</a>
+            <a href="#planning-s2">02 · 做 agent 系统时怎么设计工作流编排</a>
           </div>
         </details>
         <details class="toc-group" id="qwenRlTocGroup">
@@ -1878,6 +1893,70 @@ memory_get({
           <div class="refs">参考：<code class="inline">docs/automation/taskflow.md</code>、<code class="inline">docs/automation/tasks.md</code>、<code class="inline">docs/automation/cron-jobs.md</code>、<code class="inline">docs/automation/hooks.md</code>、<code class="inline">docs/concepts/messages.md</code>、<code class="inline">docs/concepts/queue.md</code>、<code class="inline">docs/concepts/agent-loop.md</code></div>
         </section>
 
+        <section class="section reveal" id="planning-s2">
+          <div class="section-header"><div class="index">P2</div><h2>别人问：做一个 agent 系统，怎么设计工作流编排</h2></div>
+          <p>按照 OpenClaw 的思路，不要把 agent 系统设计成“一个大 while loop 里随便调工具”。更稳的回答是：<strong>把工作流拆成触发、会话、队列、执行、工具、后台任务、流程状态、交付、观测这几层</strong>。每层职责清楚，系统才可恢复、可审计、可扩展。</p>
+          <div class="callout"><strong>可以直接这样回答：</strong>我会把 agent 工作流编排设计成分层架构：入口层接收消息/定时/webhook；session 层维护上下文和身份；queue 层处理并发；agent loop 层负责推理和工具调用；tool runtime 层执行外部动作；background task 层承接长任务；flow 层记录多步骤状态机；delivery 层把结果送回用户；observability 层负责日志、状态、取消和恢复。</div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. Trigger layer：先统一入口</h3>
+              <p>消息、CLI、cron、webhook、hook、API 请求都先变成统一的 run request。不要让每个入口自己直接驱动模型，否则后面权限、日志、重试会失控。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Session layer：上下文必须有归属</h3>
+              <p>每个请求要归到 agent、channel、account、peer/thread、sessionId。这样才能知道该用哪个历史、哪个权限、哪个 workspace、哪个模型配置。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Queue layer：并发不要靠运气</h3>
+              <p>同一个 session 同时来多条消息时，要明确策略：排队、合并、steer 当前 run、丢弃、或开新 isolated run。否则 agent 会并发写同一份状态。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Agent loop：只负责决策循环</h3>
+              <p>agent loop 做的事是：读上下文 → 计划 → 调工具 → 消化工具结果 → 继续计划 → 输出。它不应该直接承担长期流程状态机和外部调度。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. Tool runtime：工具是受控 I/O</h3>
+              <p>文件、浏览器、shell、memory、message、sessions、cron、LLM 子任务都应该是有 schema、有权限、有日志的工具，而不是模型自由拼字符串执行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. Task / Flow：长流程要持久化</h3>
+              <p>单个后台工作用 task；多个步骤、分支、等待、审批、重试用 flow。flow 里要保存当前 step、状态、revision、子任务 id，保证进程重启后还能恢复。</p>
+            </article>
+            <article class="mini-card">
+              <h3>7. Approval / policy：高风险动作要设门</h3>
+              <p>发消息、改代码、下单、发邮件、执行危险命令这些动作要有 approval gate 或 standing orders，区分“可以自动做”和“必须问人”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. Delivery / observability：结果要可追踪</h3>
+              <p>最终输出、进度、失败原因、任务状态、日志、取消信号都要可查。否则用户只会看到 agent 卡住，不知道卡在哪一步。</p>
+            </article>
+          </div>
+          <p>一个通用 agent workflow 架构可以画成：</p>
+          <pre><code>input event
+  -> normalize request
+  -> resolve agent/session/workspace
+  -> enqueue or steer
+  -> build context
+  -> agent loop
+      -> tool calls
+      -> approvals if needed
+      -> background task if long-running
+      -> flow state if multi-step
+  -> persist transcript/task/flow state
+  -> deliver result
+  -> emit logs/status/events</code></pre>
+          <p>如果别人继续问“为什么要这么复杂”，可以回答：</p>
+          <ul>
+            <li><strong>可恢复：</strong>进程重启后，task/flow/session 状态还在。</li>
+            <li><strong>可审计：</strong>知道谁触发、做了什么、调用了什么工具、输出到哪里。</li>
+            <li><strong>可控并发：</strong>同一 session 不会多个 agent run 互相踩状态。</li>
+            <li><strong>可扩展：</strong>新增 channel、tool、cron、hook 不需要重写 agent loop。</li>
+            <li><strong>可治理：</strong>高风险动作能被 approval、policy、standing orders 限制。</li>
+          </ul>
+          <div class="callout">最短答案：按照 OpenClaw 思路，agent 系统的工作流编排核心不是“让模型自己想办法”，而是把模型放进一个有 session、queue、tool schema、task ledger、flow state、approval 和 delivery 的工程化运行时里。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/messages.md</code>、<code class="inline">docs/concepts/queue.md</code>、<code class="inline">docs/concepts/agent-loop.md</code>、<code class="inline">docs/automation/tasks.md</code>、<code class="inline">docs/automation/taskflow.md</code>、<code class="inline">docs/automation/cron-jobs.md</code>、<code class="inline">docs/automation/hooks.md</code>、<code class="inline">docs/concepts/delegate-architecture.md</code></div>
+        </section>
+
 
         <section class="section reveal" id="qwen-pipeline">
           <div class="section-header"><div class="index">01</div><h2>千问强化学习：整个训练 pipeline</h2></div>
@@ -1939,6 +2018,96 @@ GRPO/RLHF optimized model</code></pre>
 
           <div class="callout">最重要的理解：这个项目训练的不是“会聊天的 Qwen”，而是“能可靠执行代码编辑合并的 Qwen”。SFT 负责学会任务，GRPO/RLHF 负责把输出变得更可解析、更可应用、更正确、更少乱改。</div>
           <div class="refs">参考：<code class="inline">src/qwen_rlhf/README.md</code>、<code class="inline">src/qwen_rlhf/configs/*.yaml</code>、<code class="inline">src/qwen_rlhf/scripts/build_semisynth_dataset.py</code>、<code class="inline">src/qwen_rlhf/scripts/train_sft.py</code>、<code class="inline">src/qwen_rlhf/scripts/train_grpo.py</code>、<code class="inline">src/qwen_rlhf/src/qwen_edit/*.py</code></div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-1">
+          <div class="section-header"><div class="index">C1</div><h2>claude code工作流编排：总体入口</h2></div>
+          <p>服务器上的 Claude Code 源码 zip 已解压到 <code class="inline">/root/OpenClaw/src/claude_code_source/claude-code-source-code-main</code>。这份源码来自 <code class="inline">@anthropic-ai/claude-code</code> v2.1.88 的反编译/拆包研究仓库，项目自身 README 也说明它不是完整内部源码，部分 feature-gated 模块在公开 npm 包里被裁剪。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 的工作流编排不是单个函数，而是一条分层流水线：CLI/SDK 接收输入 → <code class="inline">QueryEngine</code> 管会话和 transcript → <code class="inline">query()</code> 驱动模型/工具循环 → tool orchestration 执行工具并回填结果 → AgentTool / coordinator 把复杂任务拆给子代理或 workers。</div>
+          <pre><code>main.tsx / runHeadless / REPL
+  -> QueryEngine.submitMessage()
+  -> processUserInput(): slash command / attachment / memory / prompt
+  -> query(): model streaming + tool_use loop
+  -> runTools() or StreamingToolExecutor
+  -> toolExecution(): hooks + permission + tool.call()
+  -> tool_result returns to query()
+  -> repeat until no tool_use / stop hook / compact / abort</code></pre>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-2">
+          <div class="section-header"><div class="index">C2</div><h2>QueryEngine：会话生命周期的外壳</h2></div>
+          <p><code class="inline">src/QueryEngine.ts</code> 是 headless/SDK 路径的会话生命周期管理器。它持有 <code class="inline">mutableMessages</code>、permission denials、usage、read file cache、abort controller、已发现 skills、已加载 nested memory 等状态。每次用户提交消息都会进入 <code class="inline">submitMessage()</code>，但这些会话级状态会跨 turn 保留。</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>输入处理</h3><p>调用 <code class="inline">processUserInput()</code> 解析用户 prompt、slash command、本地命令输出、attachments、memory 触发等，生成要追加到消息流里的 user/system 消息。</p></article>
+            <article class="mini-card"><h3>Transcript 持久化</h3><p>用户消息在进入模型循环前就写 transcript，避免进程在 API 返回前被杀导致 <code class="inline">--resume</code> 找不到对话。</p></article>
+            <article class="mini-card"><h3>系统初始化</h3><p>它会组装 tools、MCP clients、commands、agents、skills、plugins、permission mode、fast mode 等信息，并向 SDK 产出 system init message。</p></article>
+            <article class="mini-card"><h3>进入核心循环</h3><p>真正的模型调用与工具循环交给 <code class="inline">src/query.ts</code> 的 <code class="inline">query()</code>；QueryEngine 负责接收其 yield 的消息、记录 transcript、计算 usage、输出 SDK result。</p></article>
+          </div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-3">
+          <div class="section-header"><div class="index">C3</div><h2>query()：模型-工具循环怎么跑</h2></div>
+          <p><code class="inline">src/query.ts</code> 是真正的 agent loop。它不是简单“问一次模型就结束”，而是一个 <code class="inline">while (true)</code> 循环：每轮先整理上下文，再调用模型流式输出；如果输出包含 tool_use，就执行工具，把 tool_result 作为 user message 放回上下文，然后继续下一轮。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">从上次 compact boundary 后取消息，应用 tool result budget、snip、microcompact、context collapse、auto compact。</div>
+            <div class="flow-step" data-step="2">拼接 system prompt、user context、system context，选择当前模型和 fallback model。</div>
+            <div class="flow-step" data-step="3">调用 <code class="inline">deps.callModel()</code> 流式收 assistant 消息；发现 tool_use block 时记录到 <code class="inline">toolUseBlocks</code>。</div>
+            <div class="flow-step" data-step="4">如果没有 tool_use，执行 stop hooks、token budget continuation 判断，然后返回 completed。</div>
+            <div class="flow-step" data-step="5">如果有 tool_use，交给工具编排层执行；工具结果归一化为 user tool_result，追加回下一轮模型上下文。</div>
+          </div>
+          <div class="callout">这就是 Claude Code 的基本“工作流”：模型不是直接改文件，而是反复产生 tool_use，客户端验证权限并执行工具，再把结果喂回模型，直到模型不再请求工具。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-4">
+          <div class="section-header"><div class="index">C4</div><h2>工具执行与权限：并发、安全和 hook</h2></div>
+          <p>工具池由 <code class="inline">src/tools.ts</code> 组装：内置工具包括 Agent、Bash、Read/Edit/Write、Glob/Grep、TodoWrite、WebFetch/WebSearch、Skill、Plan、TaskStop、MCP resource 等；feature flag 会条件性加入 Workflow、Sleep、Monitor、Browser、Cron、PushNotification 等工具。</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>工具池过滤</h3><p><code class="inline">getTools()</code> 和 <code class="inline">assembleToolPool()</code> 会按 permission context、deny rules、MCP tools、simple mode、REPL mode 过滤和去重，决定模型实际能看到哪些工具 schema。</p></article>
+            <article class="mini-card"><h3>批量并发策略</h3><p><code class="inline">toolOrchestration.ts</code> 会把连续的 read-only / concurrency-safe 工具并发执行；非并发安全的写操作串行执行，避免多个写工具互相踩状态。</p></article>
+            <article class="mini-card"><h3>流式工具执行</h3><p><code class="inline">StreamingToolExecutor</code> 可以在模型流式输出 tool_use 时就开始执行工具；并发安全工具可并跑，非安全工具独占；进度消息会尽快 yield。</p></article>
+            <article class="mini-card"><h3>权限与 hooks</h3><p><code class="inline">toolExecution.ts</code> 先做 zod schema 校验、tool.validateInput、PreToolUse hooks、permission decision；允许后才调用 <code class="inline">tool.call()</code>，之后再跑 PostToolUse / failure hooks 并生成 tool_result。</p></article>
+          </div>
+          <pre><code>assistant tool_use
+  -> find tool + schema parse
+  -> validateInput
+  -> PreToolUse hooks
+  -> permission / classifier / user prompt
+  -> tool.call(input)
+  -> map result to tool_result
+  -> PostToolUse hooks
+  -> query() receives user tool_result</code></pre>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-5">
+          <div class="section-header"><div class="index">C5</div><h2>子代理与后台任务：AgentTool 如何编排</h2></div>
+          <p><code class="inline">src/tools/AgentTool/AgentTool.tsx</code> 是 Claude Code 子代理系统入口。模型调用 AgentTool 时，可以按 <code class="inline">subagent_type</code> 选择 agent definition，也可以指定 model、background、worktree isolation、cwd、team/name 等参数。真正运行子代理的逻辑在 <code class="inline">runAgent.ts</code>。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">AgentTool 解析输入，检查 agent/team/background/worktree/remote 等约束。</div>
+            <div class="flow-step" data-step="2">按 agent definition 解析可用工具：内置 agent 可用更多工具，自定义 agent 会过滤危险或不允许的工具；async agent 还有更严格 allowlist。</div>
+            <div class="flow-step" data-step="3"><code class="inline">runAgent()</code> 构造子代理 system prompt、user/system context、MCP servers、frontmatter hooks、skills、独立 transcript。</div>
+            <div class="flow-step" data-step="4">同步子代理共享父 abort controller；异步/background 子代理使用独立 abort controller，并注册 task state、progress、output file。</div>
+            <div class="flow-step" data-step="5">子代理内部再次调用同一个 <code class="inline">query()</code> loop，因此子代理本身也是完整的模型-工具循环。</div>
+          </div>
+          <div class="callout">关键点：AgentTool 不是特殊魔法；它是“在父会话里启动另一个 query loop”。区别在于子代理有自己的 prompt、tool pool、permission mode、MCP、transcript、progress 和清理逻辑。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-6">
+          <div class="section-header"><div class="index">C6</div><h2>Coordinator：多 worker 工作流编排</h2></div>
+          <p><code class="inline">src/coordinator/coordinatorMode.ts</code> 定义了 Claude Code 的 coordinator 模式。该模式把主 Claude 定位成“协调者”：它不应该把所有事情自己做完，而是把研究、实现、验证拆给多个 worker，并在 worker 结果回来后综合判断下一步。</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>角色分工</h3><p>Coordinator 负责理解用户目标、拆任务、写清楚 worker prompt、综合结果并对用户汇报；worker 负责独立研究、实现或验证。</p></article>
+            <article class="mini-card"><h3>并行优先</h3><p>源码 prompt 明确鼓励同时发起多个独立 worker：研究任务可以并行，写操作按文件边界避免冲突，验证可以与无冲突实现并行。</p></article>
+            <article class="mini-card"><h3>通知机制</h3><p>worker 完成后以 <code class="inline">&lt;task-notification&gt;</code> 形式作为 user-role 内部消息回到 coordinator；coordinator 可用 SendMessage 继续同一个 worker，或用 TaskStop 停掉错误方向。</p></article>
+            <article class="mini-card"><h3>提示词约束</h3><p>Coordinator prompt 要求每个 worker prompt 自包含：不能说“基于你的发现”，而要由 coordinator 先消化 findings，再给出具体文件、行号、目标和 done 标准。</p></article>
+          </div>
+          <pre><code>User asks complex task
+  -> Coordinator launches research workers in parallel
+  -> workers return task-notification
+  -> Coordinator synthesizes concrete spec
+  -> continue existing worker or spawn fresh implementation worker
+  -> independent verification worker proves behavior
+  -> Coordinator reports final state to user</code></pre>
+          <div class="refs">参考：<code class="inline">src/claude_code_source/claude-code-source-code-main/src/QueryEngine.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/query.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/tools.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/services/tools/*.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/tools/AgentTool/*.ts*</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/coordinator/coordinatorMode.ts</code></div>
         </section>
       </main>
     </div>
