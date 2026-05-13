@@ -1,0 +1,1941 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenClaw Memory 系统导读</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-soft: #121922;
+      --panel: rgba(18, 25, 34, 0.76);
+      --panel-strong: rgba(16, 22, 31, 0.94);
+      --text: #eef3f7;
+      --muted: #9aabb8;
+      --line: rgba(255,255,255,0.08);
+      --gold: #e7c98b;
+      --gold-soft: rgba(231, 201, 139, 0.18);
+      --cyan: #8ad2d8;
+      --shadow: 0 30px 80px rgba(0,0,0,.42);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --content: 1240px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 20%, rgba(231, 201, 139, 0.10), transparent 28%),
+        radial-gradient(circle at 82% 14%, rgba(138, 210, 216, 0.10), transparent 24%),
+        radial-gradient(circle at 50% 100%, rgba(231, 201, 139, 0.06), transparent 36%),
+        linear-gradient(180deg, #0b1016 0%, #0d1117 48%, #0a0e13 100%);
+      font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .18;
+      background-image:
+        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: radial-gradient(circle at center, black 45%, transparent 100%);
+    }
+
+    .progress {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 3px;
+      width: 0;
+      z-index: 999;
+      background: linear-gradient(90deg, var(--gold), var(--cyan));
+      box-shadow: 0 0 16px rgba(231, 201, 139, .55);
+    }
+
+    .shell {
+      width: min(calc(100% - 40px), var(--content));
+      margin: 0 auto;
+      padding: 28px 0 80px;
+    }
+
+    .hero {
+      position: relative;
+      min-height: 88vh;
+      display: grid;
+      align-items: center;
+      padding: 42px 0 24px;
+    }
+
+    .hero-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 36px;
+      padding: 44px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,.045), rgba(255,255,255,.015)),
+        rgba(10, 14, 19, .80);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: auto -8% 58% 48%;
+      height: 340px;
+      background: radial-gradient(circle, rgba(231,201,139,.18), transparent 62%);
+      transform: rotate(-12deg);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      letter-spacing: .28em;
+      text-transform: uppercase;
+      color: var(--gold);
+      padding: 10px 14px;
+      border: 1px solid rgba(231, 201, 139, .24);
+      border-radius: 999px;
+      background: rgba(231, 201, 139, 0.07);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.28fr .82fr;
+      gap: 34px;
+      align-items: end;
+      margin-top: 22px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Times New Roman", serif;
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+    }
+
+    h1 {
+      font-size: clamp(3rem, 7vw, 6rem);
+      max-width: 10ch;
+      margin-top: 18px;
+    }
+
+    .hero p.lead {
+      margin: 24px 0 0;
+      max-width: 62ch;
+      color: #d4dee6;
+      font-size: 1.08rem;
+    }
+
+    .hero-meta {
+      display: grid;
+      gap: 14px;
+      align-self: stretch;
+    }
+
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      padding: 18px 18px 16px;
+      background: rgba(255,255,255,.035);
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: .82rem;
+      text-transform: uppercase;
+      letter-spacing: .18em;
+    }
+
+    .stat-value {
+      margin-top: 8px;
+      font-size: 1.32rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 28px;
+      align-items: start;
+      margin-top: 34px;
+      transition: grid-template-columns .35s ease, gap .35s ease;
+    }
+
+    body.menu-collapsed .layout {
+      grid-template-columns: 0 minmax(0, 1fr);
+      gap: 0;
+    }
+
+    .menu-toggle {
+      position: sticky;
+      top: 18px;
+      z-index: 30;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      width: fit-content;
+      margin: 0 0 14px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 999px;
+      padding: 10px 14px;
+      background: rgba(10, 14, 19, .78);
+      color: var(--text);
+      backdrop-filter: blur(12px);
+      box-shadow: var(--shadow);
+      cursor: pointer;
+      transition: transform .25s ease, background .25s ease, border-color .25s ease;
+    }
+
+    .menu-toggle:hover {
+      transform: translateY(-1px);
+      background: rgba(255,255,255,.06);
+      border-color: rgba(231, 201, 139, .2);
+    }
+
+    .menu-toggle .icon {
+      font-size: 1rem;
+      color: var(--gold);
+      line-height: 1;
+    }
+
+    .menu-toggle .label {
+      font-size: .94rem;
+      color: #d8e3eb;
+    }
+
+    .toc {
+      position: sticky;
+      top: 24px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 18px;
+      background: var(--panel);
+      backdrop-filter: blur(14px);
+      box-shadow: var(--shadow);
+      transition: opacity .3s ease, transform .3s ease, padding .3s ease, border-color .3s ease;
+      transform-origin: top left;
+    }
+
+    .menu-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 8, 12, .58);
+      backdrop-filter: blur(6px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .28s ease;
+      z-index: 24;
+    }
+
+    body.mobile-menu-open .menu-backdrop {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    body.menu-collapsed .toc {
+      opacity: 0;
+      transform: translateX(-22px) scale(.98);
+      pointer-events: none;
+      padding: 0;
+      border-color: transparent;
+      overflow: hidden;
+    }
+
+    .toc h3 {
+      font-size: 1.08rem;
+      margin-bottom: 14px;
+    }
+
+    .toc-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .toc-head h3 {
+      margin: 0;
+    }
+
+    .toc-close {
+      display: none;
+      width: 40px;
+      height: 40px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 12px;
+      background: rgba(255,255,255,.045);
+      color: var(--text);
+      font-size: 1.35rem;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc a {
+      display: block;
+      color: var(--muted);
+      text-decoration: none;
+      padding: 10px 12px;
+      margin: 4px 0;
+      border-radius: 12px;
+      transition: .25s ease;
+      border: 1px solid transparent;
+      font-size: .95rem;
+    }
+
+    .toc-group {
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 18px;
+      background: rgba(255,255,255,.025);
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+
+    .toc-group summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 50px;
+      padding: 12px 14px;
+      cursor: pointer;
+      user-select: none;
+      color: #fff6dd;
+      font-weight: 700;
+      letter-spacing: .02em;
+      outline: none;
+    }
+
+    .toc-group summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .toc-group summary::after {
+      content: "⌄";
+      width: 28px;
+      height: 28px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(231, 201, 139, .18);
+      background: rgba(231, 201, 139, .08);
+      color: var(--gold);
+      transform: rotate(-90deg);
+      transition: transform .22s ease, background .22s ease;
+      flex: 0 0 auto;
+    }
+
+    .toc-group[open] summary::after {
+      transform: rotate(0);
+      background: rgba(231, 201, 139, .14);
+    }
+
+    .toc-group summary:focus-visible {
+      box-shadow: 0 0 0 3px rgba(138, 210, 216, .22) inset;
+    }
+
+    .toc-group-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .toc-group-title::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--gold), var(--cyan));
+      box-shadow: 0 0 16px rgba(231, 201, 139, .48);
+    }
+
+    .toc-count {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 600;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: rgba(0,0,0,.16);
+    }
+
+    .toc-group-links {
+      padding: 0 8px 10px;
+      border-top: 1px solid rgba(255,255,255,.06);
+    }
+
+    .toc-empty {
+      margin: 10px 4px 0;
+      padding: 12px;
+      border-radius: 12px;
+      color: var(--muted);
+      background: rgba(255,255,255,.025);
+      border: 1px dashed rgba(255,255,255,.10);
+      font-size: .9rem;
+    }
+
+    .toc a:hover,
+    .toc a.active {
+      color: var(--text);
+      background: rgba(255,255,255,.045);
+      border-color: rgba(231, 201, 139, .16);
+      transform: translateX(4px);
+    }
+
+    .content {
+      display: grid;
+      gap: 18px;
+    }
+
+    .section {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      padding: 28px 28px 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015));
+      box-shadow: var(--shadow);
+    }
+
+    .section::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      top: -80px;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(231,201,139,.10), transparent 65%);
+      pointer-events: none;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .index {
+      min-width: 44px;
+      height: 44px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 14px;
+      background: linear-gradient(135deg, rgba(231, 201, 139, .22), rgba(138,210,216,.14));
+      color: var(--gold);
+      font-weight: 700;
+      border: 1px solid rgba(255,255,255,.06);
+    }
+
+    .section h2 {
+      font-size: clamp(1.6rem, 3vw, 2.3rem);
+    }
+
+    .section p,
+    .section li {
+      color: #d4dde5;
+      font-size: 1rem;
+    }
+
+    .section strong {
+      color: #fff6dd;
+    }
+
+    .callout {
+      margin: 18px 0;
+      padding: 18px 18px 18px 20px;
+      border-left: 3px solid var(--gold);
+      border-radius: 0 16px 16px 0;
+      background: rgba(231, 201, 139, 0.08);
+      color: #f2e6c9;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .mini-card {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      background: rgba(255,255,255,.03);
+    }
+
+    .mini-card h3 {
+      font-size: 1.14rem;
+      margin-bottom: 8px;
+    }
+
+    .pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.08);
+      padding: 10px 14px;
+      color: #dbe7ef;
+      background: rgba(255,255,255,.03);
+      font-size: .92rem;
+    }
+
+    .flow {
+      display: grid;
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .flow-step {
+      position: relative;
+      padding: 16px 18px 16px 56px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,.025);
+    }
+
+    .flow-step::before {
+      content: attr(data-step);
+      position: absolute;
+      left: 16px;
+      top: 14px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: rgba(231, 201, 139, .16);
+      color: var(--gold);
+      font-size: .82rem;
+      font-weight: 700;
+    }
+
+    code.inline {
+      font-family: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+      font-size: .92em;
+      color: #f6deb0;
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.06);
+      padding: 2px 8px;
+      border-radius: 8px;
+    }
+
+    pre {
+      margin: 16px 0 0;
+      padding: 18px;
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,.08);
+      background: #0a0f15;
+      color: #d7e7ef;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+    }
+
+    pre code {
+      font-family: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+      font-size: .92rem;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .refs {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(255,255,255,.08);
+      color: var(--muted);
+      font-size: .92rem;
+    }
+
+    .footer {
+      margin-top: 28px;
+      padding: 24px 0 8px;
+      color: var(--muted);
+      text-align: center;
+      font-size: .92rem;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(22px);
+      transition: opacity .7s ease, transform .7s ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 1080px) {
+      .hero-grid,
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+      .layout {
+        grid-template-columns: 1fr;
+        gap: 0;
+      }
+      body.menu-collapsed .layout {
+        grid-template-columns: 1fr;
+        gap: 0;
+      }
+      .toc {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: min(86vw, 360px);
+        height: 100vh;
+        border-radius: 0 24px 24px 0;
+        padding: 20px 16px 24px;
+        overflow-y: auto;
+        background: rgba(10, 14, 19, .96);
+        border-left: 0;
+        border-top: 0;
+        border-bottom: 0;
+        transform: translateX(calc(-100% - 48px));
+        opacity: 0;
+        pointer-events: none;
+        z-index: 30;
+        box-shadow: none;
+      }
+      body.mobile-menu-open .toc {
+        display: block;
+        transform: translateX(0);
+        opacity: 1;
+        pointer-events: auto;
+        box-shadow: var(--shadow);
+      }
+      body.menu-collapsed:not(.mobile-menu-open) .toc {
+        display: none;
+        opacity: 0;
+        transform: translateX(calc(-100% - 48px));
+        padding: 20px 16px 24px;
+        border-color: transparent;
+        box-shadow: none;
+      }
+      .toc-close {
+        display: inline-grid;
+        place-items: center;
+        flex: 0 0 auto;
+      }
+      .menu-toggle {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        top: auto;
+        margin: 0;
+        z-index: 40;
+        padding: 12px 16px;
+        border-radius: 16px;
+      }
+      body.mobile-menu-open .menu-toggle {
+        opacity: 0;
+        transform: translateY(10px);
+        pointer-events: none;
+      }
+      .content {
+        margin-top: 8px;
+      }
+      h1 { max-width: none; }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(calc(100% - 22px), var(--content)); }
+      .hero-card,
+      .section { padding: 22px; }
+      .hero {
+        min-height: auto;
+        padding-top: 18px;
+      }
+      .hero-card {
+        border-radius: 26px;
+      }
+      .hero p.lead,
+      .section p,
+      .section li {
+        font-size: .97rem;
+      }
+      .section h2 {
+        line-height: 1.12;
+      }
+      .stat {
+        padding: 16px;
+      }
+      .pill-list {
+        gap: 8px;
+      }
+      .pill {
+        width: 100%;
+        justify-content: center;
+      }
+      pre {
+        padding: 14px;
+        border-radius: 14px;
+      }
+      pre code {
+        font-size: .86rem;
+      }
+      .eyebrow { letter-spacing: .18em; }
+      .section-header { align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="progress" id="progress"></div>
+  <div class="menu-backdrop" id="menuBackdrop" aria-hidden="true"></div>
+
+  <div class="shell">
+    <header class="hero reveal visible">
+      <div class="hero-card">
+        <div class="eyebrow">OpenClaw · Memory Architecture</div>
+        <div class="hero-grid">
+          <div>
+            <h1>OpenClaw Memory 系统导读</h1>
+            <p class="lead">
+              这不是“模型脑内神秘记忆”，而是一套<strong>显式、可追踪、文件驱动、插件化</strong>的记忆系统：把信息落盘、切块、建索引、检索、回读，并在 compaction 前自动做一次记忆保全。
+            </p>
+            <div class="pill-list">
+              <span class="pill">文件即记忆</span>
+              <span class="pill">Hybrid Search</span>
+              <span class="pill">SQLite / QMD</span>
+              <span class="pill">memory-core 默认实现</span>
+            </div>
+          </div>
+          <aside class="hero-meta">
+            <div class="stat">
+              <div class="stat-label">记忆载体</div>
+              <div class="stat-value">MEMORY.md / memory/*.md / DREAMS.md</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">核心对象</div>
+              <div class="stat-value">MemorySearchManager</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">默认后端路线</div>
+              <div class="stat-value">Builtin SQLite + FTS + Vector</div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="toc reveal" id="toc">
+        <div class="toc-head">
+          <h3>目录</h3>
+          <button class="toc-close" id="tocClose" type="button" aria-label="关闭目录">×</button>
+        </div>
+        <details class="toc-group" id="memoryTocGroup">
+          <summary>
+            <span class="toc-group-title">OpenClaw Memory</span>
+            <span class="toc-count">34 sections</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#s1">01 · 本质是什么</a>
+            <a href="#s2">02 · 存什么内容</a>
+            <a href="#s3">03 · 架构如何接入</a>
+            <a href="#s4">04 · 默认实现 memory-core</a>
+            <a href="#s5">05 · 核心对象 Manager</a>
+            <a href="#s6">06 · 后端 builtin / qmd</a>
+            <a href="#s7">07 · 文件发现与边界</a>
+            <a href="#s8">08 · 切块与索引</a>
+            <a href="#s9">09 · 搜索流程</a>
+            <a href="#s10">10 · vector search</a>
+            <a href="#s11">11 · memory_get 安全性</a>
+            <a href="#s12">12 · 启动注入与 flush</a>
+            <a href="#s13">13 · 一句话总结</a>
+            <a href="#s14">14 · 没有索引时 sync 干啥</a>
+            <a href="#s15">15 · preflight 是什么</a>
+            <a href="#s16">16 · FTS 虚表是什么</a>
+            <a href="#s17">17 · memory_get 工具详解</a>
+            <a href="#s18">18 · 每次记忆检索全流程</a>
+            <a href="#s19">19 · RAG 之外还有哪些记忆</a>
+            <a href="#s20">20 · QMD 是什么</a>
+            <a href="#s21">21 · embedding 模型用的是啥</a>
+            <a href="#s22">22 · memory 生命周期全图</a>
+            <a href="#s23">23 · MemorySearchManager 源码结构</a>
+            <a href="#s24">24 · builtin SQLite 表结构</a>
+            <a href="#s25">25 · chunking 规则</a>
+            <a href="#s26">26 · FTS + vector 混合排序</a>
+            <a href="#s27">27 · memory 写入机制</a>
+            <a href="#s28">28 · memory 安全边界</a>
+            <a href="#s29">29 · memory 测试入口</a>
+            <a href="#s30">30 · 被问 OpenClaw 怎么搞记忆时怎么答</a>
+            <a href="#s31">31 · Markdown memory 文件到底干啥</a>
+            <a href="#s32">32 · RAG 后会不会读完整相关内容</a>
+            <a href="#s33">33 · search 如何映射回原始 Markdown</a>
+            <a href="#s34">34 · 分层记忆和会话怎么记住</a>
+          </div>
+        </details>
+        <details class="toc-group" id="qwenRlTocGroup">
+          <summary>
+            <span class="toc-group-title">千问强化学习</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#qwen-pipeline">01 · 训练 pipeline 全流程</a>
+          </div>
+        </details>
+        <details class="toc-group" id="toolsTocGroup">
+          <summary>
+            <span class="toc-group-title">OpenClaw Tools</span>
+            <span class="toc-count">待补充</span>
+          </summary>
+          <div class="toc-group-links">
+            <div class="toc-empty">Tools 章节目录已预留。</div>
+          </div>
+        </details>
+      </nav>
+
+      <main class="content">
+        <button class="menu-toggle reveal visible" id="menuToggle" type="button" aria-expanded="true" aria-controls="toc">
+          <span class="icon">☰</span>
+          <span class="label">隐藏目录</span>
+        </button>
+
+        <section class="section reveal" id="s1">
+          <div class="section-header"><div class="index">01</div><h2>memory 的本质是什么</h2></div>
+          <p>OpenClaw 里的 memory 不是隐藏在模型内部的“神秘长期记忆”。它的本质非常工程化：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">把重要信息写到磁盘文件。</div>
+            <div class="flow-step" data-step="2">把文件切成可检索的 chunks。</div>
+            <div class="flow-step" data-step="3">建立全文索引与语义索引。</div>
+            <div class="flow-step" data-step="4">通过 <code class="inline">memory_search</code> / <code class="inline">memory_get</code> 再把需要的内容取回来。</div>
+          </div>
+          <div class="callout">也就是说：<strong>只有真正落盘的东西，才算“被记住”</strong>。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/memory.md:9-11</code></div>
+        </section>
+
+        <section class="section reveal" id="s2">
+          <div class="section-header"><div class="index">02</div><h2>memory 里到底存什么</h2></div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3><code class="inline">MEMORY.md</code></h3>
+              <p>长期记忆。适合放稳定偏好、长期决策、持续有效的事实。</p>
+            </article>
+            <article class="mini-card">
+              <h3><code class="inline">memory/YYYY-MM-DD.md</code></h3>
+              <p>日记式工作层。适合会话摘要、当天观察、上下文碎片。</p>
+            </article>
+            <article class="mini-card">
+              <h3><code class="inline">DREAMS.md</code></h3>
+              <p>可选。用于 dreaming / promotion / review 相关输出。</p>
+            </article>
+            <article class="mini-card">
+              <h3>extraPaths</h3>
+              <p>配置里可以补充额外可索引目录，让记忆范围超出默认工作区。</p>
+            </article>
+          </div>
+          <div class="refs">参考：<code class="inline">docs/concepts/memory.md:15-24</code></div>
+        </section>
+
+        <section class="section reveal" id="s3">
+          <div class="section-header"><div class="index">03</div><h2>它是怎么挂进整个架构里的</h2></div>
+          <p>memory 在 OpenClaw 里是<strong>插件槽位</strong>，不是 core 里硬编码的一团逻辑。</p>
+          <p>核心入口会读取 <code class="inline">plugins.slots.memory</code>，然后找到当前启用的 memory 插件 runtime。</p>
+          <pre><code>src/plugins/memory-runtime.ts
+- resolveMemoryRuntimePluginIds(...)
+- getActiveMemorySearchManager(...)
+- resolveActiveMemoryBackendConfig(...)</code></pre>
+          <p>而 memory 插件需要满足统一接口：</p>
+          <pre><code>src/plugins/memory-state.ts
+MemoryPluginRuntime {
+  getMemorySearchManager(...)
+  resolveMemoryBackendConfig(...)
+  closeAllMemorySearchManagers?()
+}</code></pre>
+          <div class="callout">所以 core 不关心你底层是 SQLite、QMD、LanceDB 还是别的方案；它只认统一 runtime contract。</div>
+          <div class="refs">参考：<code class="inline">src/plugins/memory-runtime.ts:9-19</code>、<code class="inline">src/plugins/memory-runtime.ts:56-75</code>、<code class="inline">src/plugins/memory-state.ts:97-110</code></div>
+        </section>
+
+        <section class="section reveal" id="s4">
+          <div class="section-header"><div class="index">04</div><h2>默认实现是谁：memory-core</h2></div>
+          <p>默认 memory 引擎是 <code class="inline">memory-core</code> 插件。</p>
+          <p>它会注册：</p>
+          <ul>
+            <li>memory capability</li>
+            <li><code class="inline">memory_search</code></li>
+            <li><code class="inline">memory_get</code></li>
+            <li><code class="inline">openclaw memory ...</code> CLI</li>
+            <li>memory flush plan</li>
+            <li>public artifacts</li>
+          </ul>
+          <pre><code>extensions/memory-core/index.ts
+api.registerMemoryCapability(...)
+api.registerTool(... memory_search ...)
+api.registerTool(... memory_get ...)
+api.registerCli(...)</code></pre>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/index.ts:157-220</code></div>
+        </section>
+
+        <section class="section reveal" id="s5">
+          <div class="section-header"><div class="index">05</div><h2>真正干活的核心对象：MemorySearchManager</h2></div>
+          <p>memory 子系统真正的统一控制器是 <code class="inline">MemorySearchManager</code>。</p>
+          <pre><code>packages/memory-host-sdk/src/host/types.ts
+interface MemorySearchManager {
+  search(...)
+  readFile(...)
+  status()
+  sync?(...)
+  probeEmbeddingAvailability()
+  probeVectorAvailability()
+  close?()
+}</code></pre>
+          <p>你可以把它理解成：<strong>索引、搜索、读取、健康检查、资源回收</strong>全部都要经过这个抽象层。</p>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/types.ts:85-110</code></div>
+        </section>
+
+        <section class="section reveal" id="s6">
+          <div class="section-header"><div class="index">06</div><h2>底层后端：builtin 与 qmd</h2></div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>builtin</h3>
+              <p>默认内建方案。核心是 SQLite + FTS + 可选向量检索。</p>
+            </article>
+            <article class="mini-card">
+              <h3>qmd</h3>
+              <p>更强的 sidecar 路线，支持 collections、sessions、paths、update policy 等。</p>
+            </article>
+          </div>
+          <pre><code>packages/memory-host-sdk/src/host/backend-config.ts
+if (backend !== "qmd") {
+  return { backend: "builtin", citations };
+}
+// else build qmd config</code></pre>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/backend-config.ts:363-452</code></div>
+        </section>
+
+        <section class="section reveal" id="s7">
+          <div class="section-header"><div class="index">07</div><h2>文件是怎么被发现的，以及边界怎么控</h2></div>
+          <p>memory 文件收集逻辑会识别：</p>
+          <ul>
+            <li><code class="inline">MEMORY.md</code></li>
+            <li><code class="inline">DREAMS.md</code></li>
+            <li><code class="inline">memory/</code> 目录</li>
+            <li>配置中的 <code class="inline">extraPaths</code></li>
+          </ul>
+          <p>同时它会主动做边界控制：</p>
+          <ul>
+            <li>跳过 symlink</li>
+            <li>按 realpath 去重</li>
+            <li>跳过 repair 辅助路径</li>
+          </ul>
+          <pre><code>packages/memory-host-sdk/src/host/internal.ts
+- isMemoryPath(...)
+- listMemoryFiles(...)
+- normalizeExtraMemoryPaths(...)</code></pre>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/internal.ts:92-100</code>、<code class="inline">packages/memory-host-sdk/src/host/internal.ts:139-216</code></div>
+        </section>
+
+        <section class="section reveal" id="s8">
+          <div class="section-header"><div class="index">08</div><h2>文件如何变成“可搜索的记忆”</h2></div>
+          <p>这里有两步：<strong>切块</strong> 和 <strong>建索引</strong>。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>切块</h3>
+              <p>Markdown 会被分成多个 chunk，每个 chunk 带有 <code class="inline">startLine</code>、<code class="inline">endLine</code>、<code class="inline">text</code>、<code class="inline">hash</code>、<code class="inline">embeddingInput</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>索引</h3>
+              <p>数据库会建立 <code class="inline">files</code>、<code class="inline">chunks</code>、<code class="inline">embedding_cache</code> 以及 FTS 虚表。</p>
+            </article>
+          </div>
+          <pre><code>packages/memory-host-sdk/src/host/memory-schema.ts
+CREATE TABLE files (...)
+CREATE TABLE chunks (...)
+CREATE TABLE embedding_cache (...)
+CREATE VIRTUAL TABLE ... USING fts5(...)</code></pre>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/internal.ts:362-465</code>、<code class="inline">packages/memory-host-sdk/src/host/memory-schema.ts:12-89</code></div>
+        </section>
+
+        <section class="section reveal" id="s9">
+          <div class="section-header"><div class="index">09</div><h2>搜索一次 memory，大概发生了什么</h2></div>
+          <div class="flow">
+            <div class="flow-step" data-step="1">先检查有没有索引；没有就尝试 <code class="inline">sync</code>。</div>
+            <div class="flow-step" data-step="2">做 query 预处理与 preflight。</div>
+            <div class="flow-step" data-step="3">如果需要，初始化 embedding provider。</div>
+            <div class="flow-step" data-step="4">跑 keyword / vector / hybrid 检索。</div>
+            <div class="flow-step" data-step="5">做 merge、score、filter，然后返回结果。</div>
+          </div>
+          <pre><code>extensions/memory-core/src/memory/manager.ts
+async search(query, opts) {
+  if (!hasIndexedContent) await sync(...)
+  const preflight = resolveMemorySearchPreflight(...)
+  if (preflight.shouldInitializeProvider) await ensureProviderInitialized()
+  ... run search ...
+}</code></pre>
+          <div class="callout">这就是为什么 memory search 不是“grep 一下文本”——它其实是带索引、带 provider、带 fallback 的完整 retrieval pipeline。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/manager.ts:302-491</code></div>
+        </section>
+
+        <section class="section reveal" id="s10">
+          <div class="section-header"><div class="index">10</div><h2>vector search 是怎么做的</h2></div>
+          <p>如果 <code class="inline">sqlite-vec</code> 可用，系统会直接走原生向量 KNN；如果不可用，就退化为读取已保存 embedding，再在进程内做 cosine similarity。</p>
+          <pre><code>extensions/memory-core/src/memory/manager-search.ts
+if (await ensureVectorReady(...)) {
+  // sqlite-vec native KNN
+} else {
+  // fallback: parse embeddings + cosineSimilarity
+}</code></pre>
+          <p>所以它不是“没有向量扩展就完全废掉”，而是会<strong>优雅降级</strong>。</p>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/manager-search.ts:121-215</code></div>
+        </section>
+
+        <section class="section reveal" id="s11">
+          <div class="section-header"><div class="index">11</div><h2>为什么 memory_get 相对安全</h2></div>
+          <p><code class="inline">memory_get</code> 不是任意文件读取器，而是一个受控的摘录工具。</p>
+          <ul>
+            <li>路径必须在允许的 memory 边界内</li>
+            <li>workspace 里只能读 memory 相关路径</li>
+            <li><code class="inline">extraPaths</code> 也会做校验</li>
+            <li>默认只返回有限行数和有限字符</li>
+            <li>如果内容过长，会返回 continuation 提示</li>
+          </ul>
+          <pre><code>packages/memory-host-sdk/src/host/read-file.ts
+readMemoryFile(...)
+
+packages/memory-host-sdk/src/host/read-file-shared.ts
+buildMemoryReadResult(...)</code></pre>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/read-file.ts:48-133</code>、<code class="inline">packages/memory-host-sdk/src/host/read-file-shared.ts:3-114</code></div>
+        </section>
+
+        <section class="section reveal" id="s12">
+          <div class="section-header"><div class="index">12</div><h2>启动时如何注入 memory，以及 compaction 前为什么会 flush</h2></div>
+          <p>启动时并不会把全部 memory 都塞进模型上下文，而是会受预算限制：</p>
+          <ul>
+            <li>每个文件最大字节数</li>
+            <li>每个文件最大字符数</li>
+            <li>总注入字符上限</li>
+            <li>默认只带最近几天 daily memory</li>
+          </ul>
+          <pre><code>src/auto-reply/reply/startup-context.ts
+- maxFileBytes
+- maxFileChars
+- maxTotalChars
+- dailyMemoryDays</code></pre>
+          <p>另外，在 compaction 前，OpenClaw 会做一次 memory flush，提醒系统把值得保留的东西写进当日 memory 文件里。</p>
+          <pre><code>extensions/memory-core/src/flush-plan.ts
+- write to memory/YYYY-MM-DD.md
+- append only
+- do not overwrite MEMORY.md / DREAMS.md / AGENTS.md</code></pre>
+          <div class="callout">设计意图非常清楚：<strong>在上下文被压缩前，先把重要信息落盘</strong>，防止 compaction 后“只剩摘要、原信息丢失”。</div>
+          <div class="refs">参考：<code class="inline">src/auto-reply/reply/startup-context.ts:7-15</code>、<code class="inline">extensions/memory-core/src/flush-plan.ts:95-139</code>、<code class="inline">src/auto-reply/reply/agent-runner-memory.ts:696-820</code></div>
+        </section>
+
+        <section class="section reveal" id="s13">
+          <div class="section-header"><div class="index">13</div><h2>一句话总结</h2></div>
+          <div class="callout">
+            OpenClaw 的 memory 是一套<strong>插件化的文件记忆系统</strong>：把记忆写入文件，把文件切块并建立全文/语义索引，再通过受控检索和回读把需要的内容拉回模型上下文，并在必要时自动执行 flush，把上下文保全到磁盘。
+          </div>
+          <h3 style="margin-top:22px; font-size:1.25rem;">推荐继续阅读的源码顺序</h3>
+          <pre><code>1. docs/concepts/memory.md
+2. extensions/memory-core/index.ts
+3. src/plugins/memory-runtime.ts
+4. packages/memory-host-sdk/src/host/types.ts
+5. packages/memory-host-sdk/src/host/internal.ts
+6. packages/memory-host-sdk/src/host/memory-schema.ts
+7. extensions/memory-core/src/memory/manager.ts
+8. extensions/memory-core/src/memory/manager-search.ts
+9. packages/memory-host-sdk/src/host/read-file.ts
+10. extensions/memory-core/src/flush-plan.ts</code></pre>
+        </section>
+
+        <section class="section reveal" id="s14">
+          <div class="section-header"><div class="index">14</div><h2>没有索引的时候 sync 是干啥的</h2></div>
+          <p>在 <code class="inline">memory_search</code> 里，如果数据库里还没有任何 chunk，代码会先强制跑一次同步：</p>
+          <pre><code>if (!hasIndexedContent) {
+  await this.sync({ reason: "search", force: true });
+}</code></pre>
+          <p>这里的 <code class="inline">sync</code> 不是“同步模型记忆”，而是把磁盘上的 memory 文件整理成可搜索索引。它主要做这些事：</p>
+          <ul>
+            <li>扫描 <code class="inline">MEMORY.md</code>、<code class="inline">memory/*.md</code>、extra paths，以及可选 session transcript。</li>
+            <li>读取文件内容，计算 hash、mtime、size，判断哪些文件新增、修改或删除。</li>
+            <li>把 Markdown 切成 chunks，写入 <code class="inline">chunks</code> 表。</li>
+            <li>更新 FTS 全文索引，让关键词搜索能工作。</li>
+            <li>如果 embedding provider 可用，就为 chunk 生成 embedding，并写入 vector/embedding 相关存储。</li>
+          </ul>
+          <div class="callout">所以第一次搜索前没有索引时，<code class="inline">sync</code> 的作用就是“现场建索引”，避免刚启动后第一次搜索直接返回空结果。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/manager.ts:315-325</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s15">
+          <div class="section-header"><div class="index">15</div><h2>preflight 是什么</h2></div>
+          <p><code class="inline">preflight</code> 是搜索真正执行前的一道轻量检查。它不查数据库、不调用 embedding provider，只判断这次搜索有没有必要继续。</p>
+          <pre><code>const normalizedQuery = query.trim();
+if (!normalizedQuery) shouldSearch = false;
+if (!hasIndexedContent) shouldSearch = false;
+otherwise shouldSearch = true and shouldInitializeProvider = true;</code></pre>
+          <p>在当前实现里，preflight 只做三件事：</p>
+          <ul>
+            <li>把 query 前后空白 trim 掉。</li>
+            <li>如果 query 为空，就不搜索，也不初始化 provider。</li>
+            <li>如果没有任何已索引内容，就不搜索，也不初始化 provider。</li>
+          </ul>
+          <p>只有 query 非空且已有索引内容时，它才允许继续搜索，并告诉上层可以初始化 embedding provider。</p>
+          <div class="callout">它的工程价值是避免无意义成本：空 query 或空索引时，不需要启动 embedding provider，也不需要跑 FTS/vector 查询。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/manager-search-preflight.ts:1-31</code>、<code class="inline">extensions/memory-core/src/memory/manager.ts:327-347</code></div>
+        </section>
+
+        <section class="section reveal" id="s16">
+          <div class="section-header"><div class="index">16</div><h2>FTS 虚表是什么</h2></div>
+          <p>FTS 是 SQLite 的 Full Text Search，全文搜索。所谓“虚表”就是 SQLite 里的 virtual table：它看起来像普通表，可以查询，但底层由扩展模块维护特殊索引结构。</p>
+          <p>OpenClaw 创建的 FTS 虚表大概长这样：</p>
+          <pre><code>CREATE VIRTUAL TABLE chunks_fts USING fts5(
+  text,
+  id UNINDEXED,
+  path UNINDEXED,
+  source UNINDEXED,
+  model UNINDEXED,
+  start_line UNINDEXED,
+  end_line UNINDEXED
+);</code></pre>
+          <p>这里真正参与全文搜索的是 <code class="inline">text</code>。其他字段标成 <code class="inline">UNINDEXED</code>，意思是它们只是跟结果一起返回的元数据，不参与倒排索引。</p>
+          <p>它解决的是关键词搜索问题，比如错误码、配置键、文件名片段、精确术语。vector search 擅长语义相似，但对精确字符串不一定可靠；FTS 则补上这个短板。</p>
+          <div class="callout">所以 hybrid search 里的 “BM25/keyword path” 就依赖 FTS 虚表。它让 <code class="inline">memory_search</code> 不只是语义相似搜索，也能找精确词。</div>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/memory-schema.ts:59-82</code>、<code class="inline">extensions/memory-core/src/memory/manager-search.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s17">
+          <div class="section-header"><div class="index">17</div><h2>memory_get 工具详解</h2></div>
+          <p><code class="inline">memory_get</code> 的定位不是搜索，而是<strong>按路径精确读取一段记忆文件</strong>。通常流程是先用 <code class="inline">memory_search</code> 找到相关片段，再用 <code class="inline">memory_get</code> 拉取更完整、可核对的原文行。</p>
+          <p>它的参数很少：</p>
+          <ul>
+            <li><code class="inline">path</code>：必填，要读取的 memory 文件路径。</li>
+            <li><code class="inline">from</code>：可选，从第几行开始读。</li>
+            <li><code class="inline">lines</code>：可选，读取多少行。</li>
+            <li><code class="inline">corpus</code>：可选，<code class="inline">memory</code>、<code class="inline">wiki</code>、<code class="inline">all</code>。</li>
+          </ul>
+          <pre><code>MemoryGetSchema = {
+  path: string,
+  from?: number,
+  lines?: number,
+  corpus?: "memory" | "wiki" | "all"
+}</code></pre>
+          <p>执行时会先解析当前 agent 和配置。如果 memory search 被禁用，工具不会被创建。真正执行时，它按 corpus 和 backend 分支：</p>
+          <ul>
+            <li><code class="inline">corpus=wiki</code>：直接去 registered corpus supplement 里读，比如 memory-wiki。</li>
+            <li><code class="inline">builtin</code> backend：调用 <code class="inline">readAgentMemoryFile</code>，再进入 <code class="inline">readMemoryFile</code>。</li>
+            <li><code class="inline">qmd</code> backend：先拿 <code class="inline">MemorySearchManager</code>，再调用它的 <code class="inline">readFile</code>。</li>
+            <li><code class="inline">corpus=all</code>：如果 memory 文件读取失败，会尝试从 supplement 里 fallback。</li>
+          </ul>
+          <p>它返回的核心结果是：</p>
+          <pre><code>{
+  path: string,
+  text: string,
+  from?: number,
+  lines?: number,
+  truncated?: true,
+  nextFrom?: number
+}</code></pre>
+          <div class="callout"><code class="inline">memory_get</code> 的关键点是“安全精确读取”：它不会全量暴力读取所有 memory，也不会随便读 workspace 里任意文件。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/tools.ts:391-459</code>、<code class="inline">extensions/memory-core/src/tools.shared.ts:38-44</code>、<code class="inline">packages/memory-host-sdk/src/host/read-file.ts:48-156</code></div>
+        </section>
+
+        <section class="section reveal" id="s18">
+          <div class="section-header"><div class="index">18</div><h2>每次记忆检索全流程</h2></div>
+          <p>一次完整的“记忆检索”通常不是单个动作，而是 <code class="inline">memory_search</code> 和 <code class="inline">memory_get</code> 的组合。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">工具可用性检查：memory-core 注册工具时，会确认当前 agent 配置里 memorySearch 没被禁用。</div>
+            <div class="flow-step" data-step="2">模型先调用 <code class="inline">memory_search</code>，传入自然语言 query，例如“之前我们怎么配置 QMD”。</div>
+            <div class="flow-step" data-step="3">系统拿到 active memory manager。如果 backend 是 QMD，就走 QMD manager；否则走 builtin SQLite manager。</div>
+            <div class="flow-step" data-step="4">如果索引为空，先强制 <code class="inline">sync({ reason: "search", force: true })</code>，把磁盘文件建成可搜索索引。</div>
+            <div class="flow-step" data-step="5">执行 preflight：空 query 或无索引内容直接停止，避免无意义 provider 初始化和查询。</div>
+            <div class="flow-step" data-step="6">如果可以搜索，初始化 embedding provider，然后并行/组合执行 FTS keyword search 和 vector search。</div>
+            <div class="flow-step" data-step="7">把 keyword 和 vector 结果做 hybrid merge，应用 minScore、maxResults、MMR、temporal decay 等策略。</div>
+            <div class="flow-step" data-step="8">工具返回候选片段，包括 path、startLine、endLine、score、snippet、source。</div>
+            <div class="flow-step" data-step="9">模型再用 <code class="inline">memory_get</code> 按 path/from/lines 读取原文，避免只凭 snippet 回答。</div>
+          </div>
+          <p>所以实际链路可以理解为：</p>
+          <pre><code>user question
+  -> memory_search(query)
+  -> manager.search()
+  -> sync if needed
+  -> preflight
+  -> FTS + vector retrieval
+  -> hybrid merge
+  -> search results
+  -> memory_get(path, from, lines)
+  -> exact excerpt
+  -> answer with grounded context</code></pre>
+          <div class="callout">RAG 通常对应第 2 到第 8 步；而 OpenClaw 还额外强调第 9 步，也就是用 <code class="inline">memory_get</code> 回读原文，降低只看片段摘要造成的误判。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/tools.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager.ts:302-491</code>、<code class="inline">packages/memory-host-sdk/src/host/read-file.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s19">
+          <div class="section-header"><div class="index">19</div><h2>记忆一共有哪些，除了 RAG</h2></div>
+          <p>如果把 RAG 理解成“搜索索引，然后把相关片段取回上下文”，那 OpenClaw 的 memory 体系里还有几类不是单纯 RAG 的记忆。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Bootstrap Memory</h3>
+              <p>启动新会话时，系统会把 <code class="inline">MEMORY.md</code> 和最近几天的 daily memory 以受限预算注入上下文。这不是搜索，而是启动时的基础记忆。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Exact Read Memory</h3>
+              <p><code class="inline">memory_get</code> 按文件和行号读取原文。它不是语义检索，而是精确回读。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Session Memory</h3>
+              <p>可选地把历史 session transcript 建索引，让后续能搜索以前的对话。它属于会话历史召回。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Memory Flush</h3>
+              <p>compaction 前自动提醒模型把重要内容写进 <code class="inline">memory/YYYY-MM-DD.md</code>，这是防止上下文压缩丢信息的写入机制。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Dreaming / Promotion</h3>
+              <p>后台整理短期信号，把高价值内容候选提升到长期记忆，并把审阅信息写到 <code class="inline">DREAMS.md</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Memory Wiki</h3>
+              <p>memory-wiki 把 durable memory 编译成更像知识库的结构，有 claims、evidence、dashboard、wiki_search、wiki_get。</p>
+            </article>
+          </div>
+          <p>换句话说，OpenClaw 的记忆不是只有“RAG 搜索”。它至少包括：</p>
+          <ul>
+            <li>启动注入型记忆：直接进入 prompt。</li>
+            <li>检索型记忆：<code class="inline">memory_search</code>。</li>
+            <li>精确读取型记忆：<code class="inline">memory_get</code>。</li>
+            <li>会话历史型记忆：session transcript indexing。</li>
+            <li>自动写入型记忆：memory flush。</li>
+            <li>整理晋升型记忆：dreaming / promotion。</li>
+            <li>知识库型记忆：memory-wiki。</li>
+            <li>外部补充语料：registered corpus supplements。</li>
+          </ul>
+          <div class="callout">RAG 是 recall 的一部分，但 OpenClaw 的 memory 更像一个“写入、启动注入、搜索、精读、整理、晋升、知识库化”的完整生命周期。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/memory.md</code>、<code class="inline">src/auto-reply/reply/startup-context.ts</code>、<code class="inline">extensions/memory-core/src/flush-plan.ts</code>、<code class="inline">docs/plugins/memory-wiki.md</code></div>
+        </section>
+
+        <section class="section reveal" id="s20">
+          <div class="section-header"><div class="index">20</div><h2>QMD 是什么</h2></div>
+          <p><code class="inline">QMD</code> 不是 memory 文件本身，也不是某一个 embedding 模型。它是 OpenClaw 可选的<strong>本地优先搜索 sidecar / 后端引擎</strong>：OpenClaw 把要检索的记忆、额外目录、可选 session transcript 交给 QMD 建 collection，然后通过 <code class="inline">qmd search</code>、<code class="inline">qmd query</code> 等子进程接口取回结果。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>和 builtin 后端的区别</h3>
+              <p>builtin 后端是在 OpenClaw 进程内用 SQLite、FTS、向量索引维护 memory。QMD 后端则把索引更新、BM25 搜索、向量搜索、reranking、query expansion 交给外部 <code class="inline">qmd</code> 工具处理。</p>
+            </article>
+            <article class="mini-card">
+              <h3>默认模式不是语义搜索</h3>
+              <p>OpenClaw 的 QMD 默认 <code class="inline">searchMode</code> 是 <code class="inline">search</code>，也就是 BM25 词法搜索。这个模式下它不会主动维护 semantic embedding。只有 <code class="inline">vsearch</code> 或 <code class="inline">query</code> 才会进入更语义化的路径。</p>
+            </article>
+            <article class="mini-card">
+              <h3>QMD home 和 collection</h3>
+              <p>启用后，OpenClaw 会在 <code class="inline">~/.openclaw/agents/&lt;agentId&gt;/qmd/</code> 下管理 QMD home，并从 <code class="inline">MEMORY.md</code>、<code class="inline">memory/</code>、配置的额外路径、可选 session transcript 创建 collection。</p>
+            </article>
+            <article class="mini-card">
+              <h3>失败时的行为</h3>
+              <p>如果 QMD 不可用、二进制缺失或 sidecar 失败，OpenClaw 会回退到 builtin SQLite memory engine，避免单次 QMD 故障直接让 memory 搜索完全不可用。</p>
+            </article>
+          </div>
+          <p>启用 QMD 的最小配置类似这样：</p>
+          <pre><code>{
+  memory: {
+    backend: "qmd"
+  }
+}</code></pre>
+          <div class="callout">一句话：QMD 是“把 memory 检索外包给一个更强的本地搜索引擎”。它可以做 BM25、vector search、reranking、query expansion，也可以索引 workspace memory 之外的本地资料。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/memory-qmd.md</code>、<code class="inline">packages/memory-host-sdk/src/host/backend-config.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s21">
+          <div class="section-header"><div class="index">21</div><h2>embedding 模型用的是啥</h2></div>
+          <p>这里没有一个全局固定答案，取决于你走的是 <strong>builtin memory 后端</strong> 还是 <strong>QMD 后端</strong>，以及配置里的 provider / model 怎么设。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>builtin 后端</h3>
+              <p>builtin memory 的 embedding 配置在 <code class="inline">agents.defaults.memorySearch</code>。如果显式设置 <code class="inline">provider</code> 和 <code class="inline">model</code>，就用你指定的模型；如果 model 为空，就用该 provider adapter 的默认模型。</p>
+            </article>
+            <article class="mini-card">
+              <h3>auto provider</h3>
+              <p>如果 provider 是 <code class="inline">auto</code> 或没有显式设置，OpenClaw 会按可用性选择 provider：local、github-copilot、openai、gemini、voyage、mistral、deepinfra、bedrock 等。<code class="inline">ollama</code> 支持但通常需要显式配置。</p>
+            </article>
+            <article class="mini-card">
+              <h3>local 默认模型</h3>
+              <p>本地 embedding adapter 的默认模型是 <code class="inline">hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf</code>。文档也把它简称为 <code class="inline">embeddinggemma-300m-qat-Q8_0.gguf</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>OpenAI 示例模型</h3>
+              <p>OpenClaw 配置文档里的 OpenAI 示例使用 <code class="inline">text-embedding-3-small</code>。这不是所有安装的强制默认值，而是显式选择 OpenAI provider 时常见的配置示例。</p>
+            </article>
+          </div>
+          <p>builtin 后端的典型配置：</p>
+          <pre><code>{
+  agents: {
+    defaults: {
+      memorySearch: {
+        provider: "openai",
+        model: "text-embedding-3-small"
+      }
+    }
+  }
+}</code></pre>
+          <p>如果使用 QMD 后端，embedding / rerank / generate 模型主要由 QMD 自己控制。OpenClaw 不在普通 memorySearch 配置里替 QMD 指定模型，而是把这些环境变量原样传给 QMD：</p>
+          <pre><code>export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+export QMD_RERANK_MODEL="/absolute/path/to/reranker.gguf"
+export QMD_GENERATE_MODEL="/absolute/path/to/generator.gguf"</code></pre>
+          <div class="callout">判断当前到底用哪个 embedding 模型：先看 <code class="inline">memory.backend</code>。如果是 builtin，看 <code class="inline">agents.defaults.memorySearch.provider/model</code> 和 provider auto-select 结果；如果是 QMD，看 <code class="inline">QMD_EMBED_MODEL</code> 或 QMD 自己下载/选择的模型。</div>
+          <div class="refs">参考：<code class="inline">docs/reference/memory-config.md</code>、<code class="inline">extensions/memory-core/src/memory/embeddings.ts</code>、<code class="inline">extensions/memory-core/src/memory/provider-adapters.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/embedding-defaults.ts</code>、<code class="inline">docs/concepts/memory-qmd.md</code></div>
+        </section>
+
+        <section class="section reveal" id="s22">
+          <div class="section-header"><div class="index">22</div><h2>memory 生命周期全图</h2></div>
+          <p>OpenClaw memory 的生命周期不是单个“检索函数”，而是一条从<strong>写入、建索引、搜索、回读、上下文保全、后台整理</strong>组成的链路。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">信息先落到可审计的文件或 transcript：<code class="inline">MEMORY.md</code>、<code class="inline">memory/YYYY-MM-DD.md</code>、可选 session transcript、QMD extra paths。</div>
+            <div class="flow-step" data-step="2">sync 扫描文件，计算 hash / mtime / size，判断哪些文件新增、变化、删除。</div>
+            <div class="flow-step" data-step="3">文件被切成 chunk，记录 path、source、startLine、endLine、hash、text。</div>
+            <div class="flow-step" data-step="4">builtin 后端写 SQLite 表、FTS 虚表、可选 sqlite-vec 向量表；QMD 后端写 QMD collection。</div>
+            <div class="flow-step" data-step="5">模型需要旧信息时调用 <code class="inline">memory_search</code> 召回候选片段。</div>
+            <div class="flow-step" data-step="6">如果需要核对原文，再用 <code class="inline">memory_get</code> 按 path/from/lines 精确读取。</div>
+            <div class="flow-step" data-step="7">临近 compaction 时，memory flush 让模型把 durable 信息追加到当天 memory 文件。</div>
+            <div class="flow-step" data-step="8">dreaming / promotion 后台整理短期信号，产生候选长期记忆或 dream report。</div>
+          </div>
+          <div class="callout">最重要的源码阅读顺序：先看 tool 入口，再看 manager.search，再看 sync/indexFile/writeChunks，最后看 flush 和 dreaming。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/tools.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-embedding-ops.ts</code>、<code class="inline">extensions/memory-core/src/flush-plan.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s23">
+          <div class="section-header"><div class="index">23</div><h2>MemorySearchManager 源码结构</h2></div>
+          <p><code class="inline">MemorySearchManager</code> 是 OpenClaw memory 后端要实现的统一接口。上层工具不直接关心底层是 builtin SQLite 还是 QMD，它只调用 manager 的 <code class="inline">search</code>、<code class="inline">readFile</code>、<code class="inline">sync</code>、<code class="inline">status</code> 这类能力。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>入口选择</h3>
+              <p><code class="inline">getMemorySearchManager</code> 根据配置选择后端。builtin 走 <code class="inline">MemoryIndexManager</code>，QMD 走 <code class="inline">QmdMemoryManager</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>builtin 主类</h3>
+              <p><code class="inline">MemoryIndexManager</code> 位于 <code class="inline">manager.ts</code>，负责 provider 初始化、search 入口、状态暴露、SQLite 连接和 builtin runtime 编排。</p>
+            </article>
+            <article class="mini-card">
+              <h3>同步拆分</h3>
+              <p><code class="inline">manager-sync-ops.ts</code> 负责 watcher、interval sync、session sync、full reindex 判断、stale row 清理。</p>
+            </article>
+            <article class="mini-card">
+              <h3>索引写入拆分</h3>
+              <p><code class="inline">manager-embedding-ops.ts</code> 负责 chunking、embedding batch、FTS 写入、vector 写入、embedding cache。</p>
+            </article>
+          </div>
+          <p>可以把源码分层理解成：</p>
+          <pre><code>tools.ts
+  -> getMemorySearchManager(...)
+    -> MemoryIndexManager / QmdMemoryManager
+      -> sync / search / readFile / status
+        -> SQLite + FTS + sqlite-vec 或 QMD subprocess</code></pre>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/search-manager.ts</code>、<code class="inline">extensions/memory-core/src/memory/index.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager.ts</code>、<code class="inline">extensions/memory-core/src/memory/qmd-manager.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s24">
+          <div class="section-header"><div class="index">24</div><h2>builtin SQLite 表结构</h2></div>
+          <p>builtin memory index 的核心数据在 SQLite。它不是只存一堆文本，而是把文件状态、chunk、FTS、embedding cache、可选 vector table 分开维护。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>meta</h3>
+              <p>存索引元数据，例如 provider/model、chunk 参数、vector 维度、FTS tokenizer、scope hash。用于判断是否需要 full reindex。</p>
+            </article>
+            <article class="mini-card">
+              <h3>files</h3>
+              <p>按 path 记录文件 hash、mtime、size、source。sync 用它判断文件是否变了，以及哪些旧文件已经不存在。</p>
+            </article>
+            <article class="mini-card">
+              <h3>chunks</h3>
+              <p>每个 chunk 一行：id、path、source、start_line、end_line、hash、model、text、embedding、updated_at。它是搜索结果和 memory_get 行号的基础。</p>
+            </article>
+            <article class="mini-card">
+              <h3>chunks_fts / chunks_vec</h3>
+              <p><code class="inline">chunks_fts</code> 是 FTS5 虚表；<code class="inline">chunks_vec</code> 是 sqlite-vec 虚表，只有 vector enabled 且扩展可用时创建。</p>
+            </article>
+          </div>
+          <pre><code>meta
+files(path, source, hash, mtime, size)
+chunks(id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+chunks_fts(text, id, path, source, model, start_line, end_line)
+chunks_vec(id, embedding)</code></pre>
+          <div class="callout">研究表结构时重点看两件事：source 字段如何区分 memory / sessions，以及 model 字段如何避免不同 embedding 模型的索引混在一起。</div>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/memory-schema.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-vector-write.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s25">
+          <div class="section-header"><div class="index">25</div><h2>chunking 规则</h2></div>
+          <p>chunking 的目标是把 markdown / transcript 切成适合 embedding 和检索的片段，同时保留原始行号，方便后续 <code class="inline">memory_get</code> 回读。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>按 token 预算估算字符</h3>
+              <p><code class="inline">chunkMarkdown</code> 根据 <code class="inline">chunking.tokens</code> 和内部字符估算上限决定每块大小，不是直接调用 tokenizer 精确切。</p>
+            </article>
+            <article class="mini-card">
+              <h3>支持 overlap</h3>
+              <p>每次 flush 一个 chunk 后，会按 <code class="inline">chunking.overlap</code> 保留尾部内容到下一块，减少跨 chunk 信息断裂。</p>
+            </article>
+            <article class="mini-card">
+              <h3>保留 startLine / endLine</h3>
+              <p>每个 chunk 都记录起止行。session transcript 会先转成文本，再用 lineMap 把内容行号 remap 回原 transcript 行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>CJK 长行处理</h3>
+              <p>对中文、日文等 CJK-heavy 长文本，代码会做更细的切分，并避免切断 UTF-16 surrogate pair。</p>
+            </article>
+          </div>
+          <p>源码核心流程可以简化成：</p>
+          <pre><code>content.split("\\n")
+for each line:
+  split long line into segments
+  if current chunk exceeds budget:
+    flush()
+    carryOverlap()
+  append segment with lineNo
+flush()</code></pre>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/internal.ts:362-466</code>、<code class="inline">extensions/memory-core/src/memory/manager-embedding-ops.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s26">
+          <div class="section-header"><div class="index">26</div><h2>FTS + vector 混合排序</h2></div>
+          <p>builtin search 不是简单“只搜向量”。它优先做 hybrid：关键词 FTS 和向量相似度各自产生候选，然后合并、去重、加权排序。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">preflight 清洗 query，并确认索引里有内容。</div>
+            <div class="flow-step" data-step="2">如果 provider 不可用，就进入 FTS-only 模式，只查 <code class="inline">chunks_fts</code>。</div>
+            <div class="flow-step" data-step="3">如果 provider 可用，先查 FTS 候选，再把 query embed 成向量查 vector 候选。</div>
+            <div class="flow-step" data-step="4">按 chunk id 合并结果，同一个 chunk 同时保留 <code class="inline">vectorScore</code> 和 <code class="inline">textScore</code>。</div>
+            <div class="flow-step" data-step="5">最终分数大致是：<code class="inline">vectorWeight * vectorScore + textWeight * textScore</code>。</div>
+            <div class="flow-step" data-step="6">之后可继续应用 temporal decay 和 MMR，让结果兼顾新近度和多样性。</div>
+          </div>
+          <p>FTS query 本身会把 query 里的词提取出来，构造成 quoted AND 查询；BM25 rank 会被转成 0 到 1 附近的可合并分数。</p>
+          <div class="callout">研究排序时不要只看 <code class="inline">searchVector</code>。真正的排序入口在 <code class="inline">mergeHybridResults</code>，还要看 <code class="inline">mmr.ts</code> 和 <code class="inline">temporal-decay.ts</code>。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/manager.ts:302-470</code>、<code class="inline">extensions/memory-core/src/memory/hybrid.ts</code>、<code class="inline">extensions/memory-core/src/memory/mmr.ts</code>、<code class="inline">extensions/memory-core/src/memory/temporal-decay.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s27">
+          <div class="section-header"><div class="index">27</div><h2>memory 写入机制</h2></div>
+          <p>OpenClaw 的 memory 写入分两类：一类是<strong>用户或模型把内容写进 durable memory 文件</strong>，另一类是<strong>索引器把文件内容写进搜索 index</strong>。这两件事不要混在一起。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>durable 文件写入</h3>
+              <p>真正长期保留的信息应该追加到 <code class="inline">memory/YYYY-MM-DD.md</code> 或维护在 <code class="inline">MEMORY.md</code>。memory flush 明确要求 append，不要覆盖。</p>
+            </article>
+            <article class="mini-card">
+              <h3>pre-compaction flush</h3>
+              <p>临近 compaction 时，OpenClaw 可运行 silent memory flush，让模型把本轮值得长期保存的信息写到当天 memory 文件；如果没东西保存则返回 silent token。</p>
+            </article>
+            <article class="mini-card">
+              <h3>索引写入</h3>
+              <p>sync 后 <code class="inline">indexFile</code> 会 chunk 文件、生成 embedding、写 <code class="inline">chunks</code>、<code class="inline">chunks_fts</code>、可选 <code class="inline">chunks_vec</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>后台整理写入</h3>
+              <p>dreaming / promotion 会记录短期召回信号和 dream report，把可能有价值的信息整理成候选长期记忆。</p>
+            </article>
+          </div>
+          <div class="callout">判断“写 memory”是哪一种：如果写的是 markdown 文件，那是 durable memory；如果写的是 SQLite/QMD，那是检索索引，可以重建。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/flush-plan.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-embedding-ops.ts</code>、<code class="inline">extensions/memory-core/src/short-term-promotion.ts</code>、<code class="inline">extensions/memory-core/src/dreaming*.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s28">
+          <div class="section-header"><div class="index">28</div><h2>memory 安全边界</h2></div>
+          <p>Memory 系统的安全边界主要是：哪些内容会被索引、哪些内容能被工具读、哪些内容会进入 prompt。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>索引边界</h3>
+              <p>默认只索引 workspace 的 <code class="inline">MEMORY.md</code> 和 <code class="inline">memory/</code>，以及配置允许的 extra paths / sessions。watcher 会跳过 <code class="inline">.git</code>、<code class="inline">node_modules</code>、虚拟环境、缓存目录等。</p>
+            </article>
+            <article class="mini-card">
+              <h3>读取边界</h3>
+              <p><code class="inline">memory_get</code> 不是任意文件读取器。它按受控 memory path、QMD collection prefix 或 registered corpus supplement 读取，并限制行号范围。</p>
+            </article>
+            <article class="mini-card">
+              <h3>session 可见性</h3>
+              <p>session transcript 搜索会经过 <code class="inline">filterMemorySearchHitsBySessionVisibility</code>，避免把不该暴露的会话结果直接返回。</p>
+            </article>
+            <article class="mini-card">
+              <h3>失败要显式暴露</h3>
+              <p>embedding quota、provider 错误、FTS/vector 不可用时，工具会返回 disabled/unavailable/debug 信息，调用方不应该假装 memory 搜索成功。</p>
+            </article>
+          </div>
+          <div class="callout">安全上最值得查的不是“能不能搜到”，而是“这个来源是否应该被索引、是否应该被当前 session 看见、是否应该被注入上下文”。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/tools.ts</code>、<code class="inline">extensions/memory-core/src/tools.shared.ts</code>、<code class="inline">extensions/memory-core/src/session-search-visibility.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/read-file.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s29">
+          <div class="section-header"><div class="index">29</div><h2>memory 测试入口</h2></div>
+          <p>如果要改 OpenClaw memory，测试入口要按风险分层选。不要只跑一个 happy path，因为 memory 的失败模式通常在 provider、SQLite、FTS、vector、QMD fallback、session visibility 上。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>工具层测试</h3>
+              <p>看 <code class="inline">tools.test.ts</code>、<code class="inline">tools.citations.test.ts</code>、<code class="inline">tools.recall-tracking.test.ts</code>。验证 memory_search / memory_get 返回格式、引用、错误降级。</p>
+            </article>
+            <article class="mini-card">
+              <h3>manager 搜索测试</h3>
+              <p>看 <code class="inline">manager-search.test.ts</code>、<code class="inline">manager-search-preflight.test.ts</code>、<code class="inline">hybrid.test.ts</code>、<code class="inline">mmr.test.ts</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>sync / reindex 测试</h3>
+              <p>看 <code class="inline">manager.atomic-reindex.test.ts</code>、<code class="inline">manager-targeted-sync.test.ts</code>、<code class="inline">manager.session-reindex.test.ts</code>、<code class="inline">manager.sync-errors-do-not-crash.test.ts</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>QMD / provider 测试</h3>
+              <p>看 <code class="inline">qmd-manager.test.ts</code>、<code class="inline">qmd-compat.test.ts</code>、<code class="inline">manager.mistral-provider.test.ts</code>、<code class="inline">manager-embedding-policy.test.ts</code>。</p>
+            </article>
+          </div>
+          <p>推荐改动后的最小验证顺序：</p>
+          <pre><code>pnpm test extensions/memory-core/src/memory/hybrid.test.ts
+pnpm test extensions/memory-core/src/memory/manager-search-preflight.test.ts
+pnpm test extensions/memory-core/src/tools.test.ts
+pnpm test extensions/memory-core/src/memory/qmd-manager.test.ts</code></pre>
+          <div class="callout">如果改了 schema、chunking、embedding model、source visibility 或 QMD fallback，必须扩展测试，不要只修快照或只跑 CLI。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/**/*.test.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/*.test.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s30">
+          <div class="section-header"><div class="index">30</div><h2>被问 OpenClaw 怎么搞记忆时怎么答</h2></div>
+          <p>如果别人问“OpenClaw 是怎么搞记忆的”，不要回答成“它有 RAG”这么浅。更准确的回答是：</p>
+          <div class="callout"><strong>OpenClaw 的记忆是文件驱动的长期记忆系统。</strong>重要信息先写进 <code class="inline">MEMORY.md</code> 或 <code class="inline">memory/YYYY-MM-DD.md</code> 这类可审计文件，然后 memory-core 或 QMD 把这些文件切成 chunks、建立 FTS/向量索引。模型需要旧信息时先用 <code class="inline">memory_search</code> 检索相关片段，再用 <code class="inline">memory_get</code> 按路径和行号回读原文。临近 compaction 时还有 memory flush，把当前会话里值得长期保存的信息追加到当天 memory 文件。</div>
+          <p>你可以按场景用下面三种说法。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>30 秒版本</h3>
+              <p>OpenClaw 不是把记忆藏在模型脑子里，而是把记忆显式写成文件。然后它对这些文件建索引，搜索时召回片段，需要核实时再按行读取原文。所以它的 memory 是“文件落盘 + 索引检索 + 原文回读 + compaction 前保全”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>源码版本</h3>
+              <p>工具入口是 <code class="inline">memory_search</code> 和 <code class="inline">memory_get</code>。它们通过 <code class="inline">getMemorySearchManager</code> 拿到 backend manager。builtin 后端是 <code class="inline">MemoryIndexManager</code>，用 SQLite、FTS5、可选 sqlite-vec；QMD 后端是 <code class="inline">QmdMemoryManager</code>，把检索交给 qmd sidecar。</p>
+            </article>
+            <article class="mini-card">
+              <h3>和普通 RAG 的区别</h3>
+              <p>RAG 只是其中的检索部分。OpenClaw 还包括启动注入、memory flush、session transcript indexing、dreaming / promotion、memory-wiki、registered corpus supplements，以及 <code class="inline">memory_get</code> 这种精确原文读取。</p>
+            </article>
+            <article class="mini-card">
+              <h3>一句话判断重点</h3>
+              <p>问“它记住了吗”时，关键不是模型有没有印象，而是信息有没有落盘、有没有被 sync 建索引、搜索结果能不能通过 <code class="inline">memory_get</code> 找回原文。</p>
+            </article>
+          </div>
+          <p>推荐你实际回答时按这个结构：</p>
+          <pre><code>1. 先说本质：文件驱动，不是模型内部魔法记忆。
+2. 再说流程：写文件 -> sync -> chunk -> FTS/vector/QMD index -> memory_search -> memory_get。
+3. 再说后端：默认 builtin SQLite/FTS/vector；也可以切到 QMD。
+4. 再说扩展：compaction 前 flush，session memory，dreaming，memory-wiki。
+5. 最后强调边界：只有落盘并被允许索引/读取的内容，才算可用记忆。</code></pre>
+          <div class="callout">最稳的短答：OpenClaw memory = durable markdown files + searchable index + exact source readback + lifecycle automation。这个答案比单说“RAG”准确得多。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/memory.md</code>、<code class="inline">extensions/memory-core/src/tools.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager.ts</code>、<code class="inline">extensions/memory-core/src/flush-plan.ts</code>、<code class="inline">docs/concepts/memory-qmd.md</code></div>
+        </section>
+
+        <section class="section reveal" id="s31">
+          <div class="section-header"><div class="index">31</div><h2>Markdown memory 文件到底干啥</h2></div>
+          <p>不是。Markdown memory 文件<strong>不只是 RAG 之后用来验证全文</strong>。它们是 OpenClaw memory 的<strong>源数据 / source of truth</strong>。RAG index、FTS、vector、QMD collection 都是从这些文件派生出来的缓存或检索结构。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 长期记忆的真实载体</h3>
+              <p><code class="inline">MEMORY.md</code> 存 curated long-term memory：稳定事实、偏好、长期决策、短摘要。<code class="inline">memory/YYYY-MM-DD.md</code> 存 daily notes：当天上下文、观察、会议/任务记录、较详细的临时知识。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 启动上下文来源</h3>
+              <p><code class="inline">MEMORY.md</code> 会作为主长期记忆在主私聊 session 启动时进入上下文，受 bootstrap budget 限制。daily memory 更适合按需检索，避免把所有日志都塞进每次 prompt。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 搜索索引的原材料</h3>
+              <p>sync 会扫描这些 Markdown 文件，切成 chunks，写入 SQLite <code class="inline">chunks</code>、<code class="inline">chunks_fts</code>、可选 <code class="inline">chunks_vec</code>；如果用 QMD，就创建/更新 QMD collection。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. memory_get 的原文来源</h3>
+              <p><code class="inline">memory_search</code> 返回的是片段和行号，<code class="inline">memory_get</code> 再按 path/from/lines 回到 Markdown 文件读原文。这确实用于核对 RAG 结果，但只是它的其中一个用途。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. flush 的写入目标</h3>
+              <p>compaction 前的 memory flush 会要求模型把重要信息追加到 <code class="inline">memory/YYYY-MM-DD.md</code>，不是写到向量库本身。向量库之后可以由 sync 重建。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. 人类可审计和可编辑</h3>
+              <p>因为是普通 Markdown，你可以直接打开、编辑、review、删掉错误记忆。索引只是服务检索；真正该信任和维护的是文件内容。</p>
+            </article>
+          </div>
+          <p>所以正确关系是：</p>
+          <pre><code>Markdown memory files
+  = durable source of truth
+  -> sync/chunk
+  -> FTS/vector/QMD index
+  -> memory_search returns snippets
+  -> memory_get reads original Markdown lines
+  -> model answers with verified context</code></pre>
+          <div class="callout">结论：Markdown 文件不是“RAG 后的全文验证附件”。它们是 OpenClaw 记忆的正本。RAG index 是从正本生成的检索视图；<code class="inline">memory_get</code> 是回到正本核对和读取更多上下文。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/memory.md</code>、<code class="inline">docs/concepts/agent-workspace.md</code>、<code class="inline">packages/memory-host-sdk/src/host/internal.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-embedding-ops.ts</code>、<code class="inline">extensions/memory-core/src/flush-plan.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s32">
+          <div class="section-header"><div class="index">32</div><h2>RAG 后会不会读完整相关内容</h2></div>
+          <p>会，但要说精确一点：<strong>OpenClaw 提供了 <code class="inline">memory_get</code> 工具让模型在 <code class="inline">memory_search</code> 之后读取相关原文；是否调用取决于模型/提示策略和问题是否需要核对。</strong></p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">模型先调用 <code class="inline">memory_search(query)</code>。这一步就是 RAG/recall：从 FTS、vector 或 QMD index 里找相关 chunks。</div>
+            <div class="flow-step" data-step="2">搜索结果会带回 <code class="inline">path</code>、<code class="inline">startLine</code>、<code class="inline">endLine</code>、snippet、score、source/corpus 等信息。</div>
+            <div class="flow-step" data-step="3">如果 snippet 不够、需要上下文、需要引用原文、或者要避免误读，模型应该继续调用 <code class="inline">memory_get(path, from, lines)</code>。</div>
+            <div class="flow-step" data-step="4"><code class="inline">memory_get</code> 回到 Markdown 文件或 QMD collection root，按行读取受限 excerpt。</div>
+            <div class="flow-step" data-step="5">如果返回 <code class="inline">truncated</code> 或 <code class="inline">nextFrom</code>，模型可以再次调用 <code class="inline">memory_get</code> 继续读后续内容。</div>
+          </div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>不是自动把全文塞进上下文</h3>
+              <p>RAG 搜索不会默认把整个 Markdown 文件全部注入。它先返回相关片段，避免浪费 token。全文或更大范围内容需要通过 <code class="inline">memory_get</code> 按需读取。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它知道怎么读，因为工具结果给了坐标</h3>
+              <p><code class="inline">memory_search</code> 的结果包含 path 和行号。模型可以直接把这些坐标传给 <code class="inline">memory_get</code>，例如从 <code class="inline">startLine</code> 附近多读几十行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>读取也是受限的</h3>
+              <p><code class="inline">memory_get</code> 默认读取有行数和字符预算，默认行数约 120 行，默认最大字符约 12k。超出时会给 continuation 信息，而不是无限读全文件。</p>
+            </article>
+            <article class="mini-card">
+              <h3>什么时候一定该 get</h3>
+              <p>当问题要求准确日期、决策依据、配置细节、长段上下文、代码/命令原文时，应该在 search 后 get。只问大概偏好或简单事实时，snippet 可能已经够用。</p>
+            </article>
+          </div>
+          <p>典型调用形态是：</p>
+          <pre><code>memory_search({
+  query: "之前 QMD searchMode 怎么配置"
+})
+
+// 假设结果返回：
+// path: "memory/2026-05-13.md", startLine: 42, endLine: 58
+
+memory_get({
+  path: "memory/2026-05-13.md",
+  from: 38,
+  lines: 40
+})</code></pre>
+          <div class="callout">结论：OpenClaw 的设计是“两步法”：<code class="inline">memory_search</code> 找到相关位置，<code class="inline">memory_get</code> 再读原文。它有工具能力读相关内容，但不会无条件自动读完整文件；这是为了控制 token、保护边界、降低无关上下文污染。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/tools.ts</code>、<code class="inline">extensions/memory-core/src/tools.shared.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/read-file.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/read-file-shared.ts</code>、<code class="inline">extensions/memory-core/src/memory/qmd-manager.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s33">
+          <div class="section-header"><div class="index">33</div><h2>search 如何映射回原始 Markdown</h2></div>
+          <p>核心机制是：<strong>索引里的每个 chunk 都保留了原始 Markdown 文件坐标</strong>。RAG 找到的不是一段“失去来源的向量文本”，而是一条带 <code class="inline">path</code>、<code class="inline">startLine</code>、<code class="inline">endLine</code> 的搜索结果。模型拿到这些字段后，就能构造 <code class="inline">memory_get</code> 调用去读原始 Markdown。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">sync 阶段读取 <code class="inline">MEMORY.md</code> / <code class="inline">memory/*.md</code>，生成 file entry：包含绝对路径、相对路径、hash、mtime、size。</div>
+            <div class="flow-step" data-step="2">chunking 阶段把文件切块，每个 chunk 记录 <code class="inline">startLine</code>、<code class="inline">endLine</code>、<code class="inline">text</code>、<code class="inline">hash</code>。</div>
+            <div class="flow-step" data-step="3">写索引时，builtin 后端把这些坐标写进 <code class="inline">chunks</code> 表，也同步写进 <code class="inline">chunks_fts</code> 和可选 <code class="inline">chunks_vec</code>。</div>
+            <div class="flow-step" data-step="4">search 阶段无论命中 FTS 还是 vector，SQL 都会取回 <code class="inline">path</code>、<code class="inline">start_line</code>、<code class="inline">end_line</code>、<code class="inline">text</code>。</div>
+            <div class="flow-step" data-step="5"><code class="inline">memory_search</code> 输出 JSON，把这些字段交给模型：<code class="inline">path</code>、<code class="inline">startLine</code>、<code class="inline">endLine</code>、<code class="inline">snippet</code>、<code class="inline">score</code>。</div>
+            <div class="flow-step" data-step="6">模型如果需要更多上下文，就用这些坐标构造 <code class="inline">memory_get({ path, from, lines })</code>。</div>
+          </div>
+          <p>builtin 后端的数据链路可以简化成：</p>
+          <pre><code>Markdown file: memory/2026-05-13.md
+  line 40..65
+    ↓ chunkMarkdown()
+chunk {
+  path: "memory/2026-05-13.md",
+  startLine: 40,
+  endLine: 65,
+  text: "...",
+  hash: "..."
+}
+    ↓ writeChunks()
+SQLite chunks / chunks_fts / chunks_vec
+    ↓ memory_search()
+result {
+  path: "memory/2026-05-13.md",
+  startLine: 40,
+  endLine: 65,
+  snippet: "...",
+  score: 0.82
+}
+    ↓ model decides to verify
+memory_get({
+  path: "memory/2026-05-13.md",
+  from: 36,
+  lines: 45
+})</code></pre>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>模型怎么“知道”下一步调 get</h3>
+              <p>工具结果本身给了可读坐标；<code class="inline">memory_get</code> 工具描述又说明它是安全读取 memory 文件 excerpt 的工具。所以模型可以把 search result 的 <code class="inline">path/startLine/endLine</code> 直接转成 get 参数。</p>
+            </article>
+            <article class="mini-card">
+              <h3>OpenClaw 是否硬编码自动连调</h3>
+              <p>通常不是后端强制自动“search 后立刻 get”。后端负责提供结构化 search 结果和 get 工具。是否继续 get 是模型根据任务判断；但对于需要准确性的回答，正确行为就是 search 后 get。</p>
+            </article>
+            <article class="mini-card">
+              <h3>QMD 怎么映射</h3>
+              <p>QMD 返回 docid / collection / file 等信息。<code class="inline">QmdMemoryManager</code> 会把它解析成 <code class="inline">doc.rel</code>，如果文件在 workspace 内就返回正常相对路径；如果在 extra collection 里，就返回 <code class="inline">qmd/&lt;collection&gt;/...</code> 虚拟路径，保证 search → readFile 能 roundtrip。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么不是直接读全文</h3>
+              <p>因为 search result 已经有定位信息，读全文通常浪费 token。更稳的做法是从命中行附近扩展读取，比如 <code class="inline">from = startLine - 5</code>、<code class="inline">lines = 40</code>。</p>
+            </article>
+          </div>
+          <div class="callout">一句话：索引不是只存 embedding；它还存“这个 embedding 来自哪个 Markdown 文件的哪几行”。RAG 命中后，模型拿到 path + line range，再用 <code class="inline">memory_get</code> 回读 Markdown 原文。</div>
+          <div class="refs">参考：<code class="inline">packages/memory-host-sdk/src/host/types.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/internal.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-embedding-ops.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-search.ts</code>、<code class="inline">extensions/memory-core/src/tools.ts</code>、<code class="inline">extensions/memory-core/src/memory/qmd-manager.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="s34">
+          <div class="section-header"><div class="index">34</div><h2>分层记忆和会话怎么记住</h2></div>
+          <p>是的，OpenClaw 实际上是<strong>分层记忆</strong>。但“跨时间”不只是靠时间戳；时间戳主要用于 daily memory、session 生命周期、排序/衰减和维护。真正让它记住会话的是<strong>持久化 session store + JSONL transcript + 可选 session indexing</strong>。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>第 1 层：当前会话上下文</h3>
+              <p>同一个 session 内，OpenClaw 会持续维护当前对话历史。模型不是每轮从零开始；当前 session 的 transcript / recent context 会参与后续 turn。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 2 层：session transcript 落盘</h3>
+              <p>会话会写到 <code class="inline">~/.openclaw/agents/&lt;agentId&gt;/sessions/&lt;sessionId&gt;.jsonl</code>。<code class="inline">sessions.json</code> 记录 session 状态和生命周期时间，比如 <code class="inline">sessionStartedAt</code>、<code class="inline">lastInteractionAt</code>、<code class="inline">updatedAt</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 3 层：durable markdown memory</h3>
+              <p>真正长期、可审计、可编辑的记忆放在 <code class="inline">MEMORY.md</code> 和 <code class="inline">memory/YYYY-MM-DD.md</code>。这里的日期文件名是跨时间组织记忆的一种方式。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 4 层：session memory search</h3>
+              <p>如果启用 session indexing，OpenClaw 会把历史 transcript 清洗成 User/Assistant 文本，再作为 <code class="inline">source="sessions"</code> 建索引，让 <code class="inline">memory_search</code> 能找以前会话里的内容。</p>
+            </article>
+          </div>
+          <p>会话是这样“被记住”的：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">用户消息进入某个 channel，OpenClaw 根据 channel/account/peer/thread 等路由到一个稳定 session。</div>
+            <div class="flow-step" data-step="2">session store 维护 session id、状态、最近交互时间、启动时间。</div>
+            <div class="flow-step" data-step="3">每轮用户/助手消息写入对应 <code class="inline">&lt;sessionId&gt;.jsonl</code> transcript。</div>
+            <div class="flow-step" data-step="4">同一 session 后续 turn 可以继续利用当前 transcript / compaction summary / recent tail。</div>
+            <div class="flow-step" data-step="5">如果启用 session memory search，sync 会扫描 transcript 文件，抽取干净的 User/Assistant 文本，过滤系统包装、heartbeat、cron、silent reply、敏感工具片段等噪音。</div>
+            <div class="flow-step" data-step="6">这些清洗后的 transcript chunks 被写入 memory index，source 标记为 <code class="inline">sessions</code>，之后可以被 <code class="inline">memory_search</code> 找到。</div>
+          </div>
+          <p>builtin session indexing 的配置方向是：</p>
+          <pre><code>{
+  agents: {
+    defaults: {
+      memorySearch: {
+        sources: ["memory", "sessions"]
+      }
+    }
+  },
+  experimental: {
+    sessionMemory: true
+  }
+}</code></pre>
+          <p>QMD 后端的 session indexing 配置方向是：</p>
+          <pre><code>{
+  memory: {
+    backend: "qmd",
+    qmd: {
+      sessions: { enabled: true }
+    }
+  }
+}</code></pre>
+          <div class="callout">关键区别：当前会话靠 session transcript 延续；长期事实靠 Markdown memory 保存；跨会话召回可以靠可选的 session transcript indexing。时间戳帮助排序、生命周期和 daily 文件组织，但不是唯一的“记住机制”。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/session.md</code>、<code class="inline">docs/concepts/agent.md</code>、<code class="inline">docs/reference/memory-config.md</code>、<code class="inline">docs/concepts/memory-qmd.md</code>、<code class="inline">packages/memory-host-sdk/src/host/session-files.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code></div>
+        </section>
+
+
+        <section class="section reveal" id="qwen-pipeline">
+          <div class="section-header"><div class="index">01</div><h2>千问强化学习：整个训练 pipeline</h2></div>
+          <p><code class="inline">qwen_rlhf</code> 已克隆到 <code class="inline">/root/OpenClaw/src/qwen_rlhf</code>，与 <code class="inline">/root/OpenClaw/src/memory</code> 平级。这个项目的核心不是 UI，而是一条完整的代码编辑模型训练流水线：<strong>准备底座模型 → 构造半合成编辑数据 → SFT 监督微调 → 离线生成与评测 → 可选 GRPO/RLHF 强化优化</strong>。</p>
+
+          <div class="callout"><strong>一句话：</strong>它把 Qwen2.5-Coder-3B-Instruct 训练成一个“代码 patch 合并器”：输入原始 Python 文件和 SEARCH/REPLACE 更新块，输出合并后的完整代码，并包在 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code> 中。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>下载/检查底座模型。</strong>用 <code class="inline">scripts/download_model.py</code> 下载 <code class="inline">Qwen2.5-Coder-3B-Instruct</code>，优先 ModelScope，失败时可走 Hugging Face；再用 <code class="inline">check_model_ready.py</code> 检查 tokenizer、config、safetensors shard 是否齐全。</div>
+            <div class="flow-step" data-step="2"><strong>构造训练数据。</strong><code class="inline">scripts/build_semisynth_dataset.py</code> 读取 <code class="inline">configs/dataset_semisynth.yaml</code>，从 CommitPackFT 流式读取提交样本，只保留单文件 Python、小范围、许可证允许、非 merge/revert/chore/lint 的修改。</div>
+            <div class="flow-step" data-step="3"><strong>把 before/after 转成 patch 任务。</strong><code class="inline">src/qwen_edit/patching.py</code> 用 <code class="inline">difflib.SequenceMatcher</code> 生成 <code class="inline">PatchHunk(search, replace)</code>，再用 <code class="inline">apply_hunks()</code> 反向校验：search 必须唯一命中，替换后必须精确等于 after。</div>
+            <div class="flow-step" data-step="4"><strong>写出 JSONL 数据集。</strong>合格样本会写到 <code class="inline">data/processed/semisynth_train.jsonl</code> 和 <code class="inline">semisynth_valid.jsonl</code>。每条样本包含 instruction、before_code、after_code、source、input_patch、target_updated、target_patch、metadata。</div>
+            <div class="flow-step" data-step="5"><strong>渲染 SFT prompt。</strong><code class="inline">src/qwen_edit/sft_dataset.py</code> 把样本变成 chat：system 说明模型是代码更新合并助手；user 给 Source Code 和 Update Patch；target 是 <code class="inline">&lt;updated&gt;最终代码&lt;/updated&gt;</code>。</div>
+            <div class="flow-step" data-step="6"><strong>LoRA SFT 训练。</strong><code class="inline">scripts/train_sft.py</code> 加载 Qwen，按 <code class="inline">configs/sft_lora.yaml</code> 启用 LoRA；target modules 覆盖 q/k/v/o projection 和 gate/up/down projection；可选 4bit NF4 量化、bf16、gradient checkpointing。</div>
+            <div class="flow-step" data-step="7"><strong>生成预测。</strong>训练后用 <code class="inline">scripts/generate_predictions.py</code> 加载 SFT 模型，对验证集逐条生成 <code class="inline">&lt;updated&gt;</code> 结果，写出 predictions JSONL。</div>
+            <div class="flow-step" data-step="8"><strong>离线评测。</strong><code class="inline">scripts/eval_offline.py</code> 调用 <code class="inline">src/qwen_edit/eval.py</code>，统计 parse_ok、exact_match、syntax_ok、minimality：既看格式是否正确，也看最终代码是否精确匹配、语法是否通过、改动是否足够小。</div>
+            <div class="flow-step" data-step="9"><strong>可选 GRPO/RLHF。</strong><code class="inline">scripts/train_grpo.py</code> 使用 <code class="inline">trl.GRPOTrainer</code>，把 SFT 模型作为起点，用 reward 函数继续优化输出格式、patch 可应用性、语法正确性和最小改动。</div>
+          </div>
+
+          <p>整条链路可以压缩成下面这张图：</p>
+          <pre><code>Qwen2.5-Coder-3B-Instruct
+  ↓ download_model.py / check_model_ready.py
+CommitPackFT raw samples
+  ↓ build_semisynth_dataset.py
+filter_commitpack_sample()
+  ↓
+make_hunks() -> format_patch() -> apply_hunks() 校验
+  ↓
+semisynth_train.jsonl / semisynth_valid.jsonl
+  ↓ sft_dataset.py
+chat prompt + &lt;updated&gt; target
+  ↓ train_sft.py
+LoRA SFT adapter / fine-tuned model
+  ↓ generate_predictions.py
+predictions.jsonl
+  ↓ eval_offline.py
+parse_ok / exact_match / syntax_ok / minimality
+  ↓ optional train_grpo.py
+GRPO/RLHF optimized model</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么先 SFT</h3>
+              <p>SFT 先让模型学会固定任务格式：读源码、读 patch、输出完整更新代码。如果没有这个阶段，RL 的 reward 很容易只惩罚错误，却无法稳定教会基本行为。</p>
+            </article>
+            <article class="mini-card">
+              <h3>RLHF 优化什么</h3>
+              <p>GRPO 阶段不是重新定义任务，而是在 SFT 基础上强化四件事：输出可解析、patch 可应用、应用后语法正确、改动规模接近 gold。</p>
+            </article>
+            <article class="mini-card">
+              <h3>数据质量关键点</h3>
+              <p>项目严格过滤提交，并要求生成的 hunk 能唯一匹配和精确还原 after。这样训练数据不是“看起来像 diff”，而是真正可执行、可校验的编辑任务。</p>
+            </article>
+            <article class="mini-card">
+              <h3>当前成熟度</h3>
+              <p>README 明确说 GRPO 先是骨架，真正开训前还要对齐硬件和 reward 细节。因此当前最完整的是数据构建、SFT、生成预测、离线评测链路。</p>
+            </article>
+          </div>
+
+          <div class="callout">最重要的理解：这个项目训练的不是“会聊天的 Qwen”，而是“能可靠执行代码编辑合并的 Qwen”。SFT 负责学会任务，GRPO/RLHF 负责把输出变得更可解析、更可应用、更正确、更少乱改。</div>
+          <div class="refs">参考：<code class="inline">src/qwen_rlhf/README.md</code>、<code class="inline">src/qwen_rlhf/configs/*.yaml</code>、<code class="inline">src/qwen_rlhf/scripts/build_semisynth_dataset.py</code>、<code class="inline">src/qwen_rlhf/scripts/train_sft.py</code>、<code class="inline">src/qwen_rlhf/scripts/train_grpo.py</code>、<code class="inline">src/qwen_rlhf/src/qwen_edit/*.py</code></div>
+        </section>
+      </main>
+    </div>
+
+    <footer class="footer">
+      本页为本地生成的 OpenClaw Memory 系统讲解页面 · 可直接在浏览器或 WPS 网页容器中打开
+    </footer>
+  </div>
+
+  <script>
+    const progress = document.getElementById('progress');
+    const sections = [...document.querySelectorAll('.section')];
+    const tocLinks = [...document.querySelectorAll('.toc a')];
+    const revealEls = [...document.querySelectorAll('.reveal')];
+    const menuToggle = document.getElementById('menuToggle');
+    const menuLabel = menuToggle?.querySelector('.label');
+    const menuBackdrop = document.getElementById('menuBackdrop');
+    const tocClose = document.getElementById('tocClose');
+    const storageKey = 'openclaw-memory-menu-collapsed';
+    const mobileQuery = window.matchMedia('(max-width: 1080px)');
+
+    function isMobileLayout() {
+      return mobileQuery.matches;
+    }
+
+    function updateMenuToggleUI() {
+      const collapsed = document.body.classList.contains('menu-collapsed');
+      const mobileOpen = document.body.classList.contains('mobile-menu-open');
+      if (menuToggle) {
+        menuToggle.setAttribute(
+          'aria-expanded',
+          String(isMobileLayout() ? mobileOpen : !collapsed)
+        );
+      }
+      if (menuLabel) {
+        if (isMobileLayout()) {
+          menuLabel.textContent = mobileOpen ? '关闭目录' : '打开目录';
+        } else {
+          menuLabel.textContent = collapsed ? '打开目录' : '隐藏目录';
+        }
+      }
+    }
+
+    function openMobileMenu() {
+      document.body.classList.add('mobile-menu-open');
+      updateMenuToggleUI();
+    }
+
+    function closeMobileMenu() {
+      document.body.classList.remove('mobile-menu-open');
+      updateMenuToggleUI();
+    }
+
+    function toggleMobileMenu() {
+      if (document.body.classList.contains('mobile-menu-open')) {
+        closeMobileMenu();
+      } else {
+        openMobileMenu();
+      }
+    }
+
+    function setMenuCollapsed(collapsed) {
+      document.body.classList.toggle('menu-collapsed', collapsed);
+      try {
+        localStorage.setItem(storageKey, collapsed ? '1' : '0');
+      } catch {}
+      if (!collapsed) {
+        closeMobileMenu();
+      }
+      updateMenuToggleUI();
+    }
+
+    try {
+      setMenuCollapsed(localStorage.getItem(storageKey) === '1');
+    } catch {
+      setMenuCollapsed(false);
+    }
+
+    function updateProgress() {
+      const doc = document.documentElement;
+      const total = doc.scrollHeight - window.innerHeight;
+      const ratio = total > 0 ? (window.scrollY / total) * 100 : 0;
+      progress.style.width = ratio + '%';
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.classList.add('visible');
+      });
+    }, { threshold: 0.12 });
+
+    revealEls.forEach(el => observer.observe(el));
+
+    const sectionObserver = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter(e => e.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) return;
+      const id = '#' + visible.target.id;
+      tocLinks.forEach(link => link.classList.toggle('active', link.getAttribute('href') === id));
+    }, { rootMargin: '-18% 0px -58% 0px', threshold: [0.15, 0.3, 0.6] });
+
+    sections.forEach(section => sectionObserver.observe(section));
+
+    menuToggle?.addEventListener('click', () => {
+      if (isMobileLayout()) {
+        document.body.classList.remove('menu-collapsed');
+        toggleMobileMenu();
+        return;
+      }
+      setMenuCollapsed(!document.body.classList.contains('menu-collapsed'));
+    });
+
+    menuBackdrop?.addEventListener('click', closeMobileMenu);
+    tocClose?.addEventListener('click', closeMobileMenu);
+
+    tocLinks.forEach(link => {
+      link.addEventListener('click', () => {
+        if (isMobileLayout()) {
+          closeMobileMenu();
+        }
+      });
+    });
+
+    mobileQuery.addEventListener?.('change', () => {
+      closeMobileMenu();
+      updateMenuToggleUI();
+    });
+
+    window.addEventListener('scroll', updateProgress, { passive: true });
+    updateMenuToggleUI();
+    updateProgress();
+  </script>
+</body>
+</html>
