@@ -893,6 +893,15 @@
             <div class="toc-empty">Tools 章节目录已预留。</div>
           </div>
         </details>
+        <details class="toc-group" id="planningTocGroup">
+          <summary>
+            <span class="toc-group-title">OpenClaw Planning</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#planning-s1">01 · OpenClaw 是怎么进行工作流编排的</a>
+          </div>
+        </details>
       </nav>
 
       <main class="content">
@@ -1823,6 +1832,50 @@ memory_get({
 }</code></pre>
           <div class="callout">关键区别：当前会话靠 session transcript 延续；长期事实靠 Markdown memory 保存；跨会话召回可以靠可选的 session transcript indexing。时间戳帮助排序、生命周期和 daily 文件组织，但不是唯一的“记住机制”。</div>
           <div class="refs">参考：<code class="inline">docs/concepts/session.md</code>、<code class="inline">docs/concepts/agent.md</code>、<code class="inline">docs/reference/memory-config.md</code>、<code class="inline">docs/concepts/memory-qmd.md</code>、<code class="inline">packages/memory-host-sdk/src/host/session-files.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="planning-s1">
+          <div class="section-header"><div class="index">P1</div><h2>OpenClaw 是怎么进行工作流编排的</h2></div>
+          <p>OpenClaw 的工作流编排不是单一模块完成的，而是几层能力叠在一起：<strong>触发入口、session/queue、agent loop、tools、background tasks、Task Flow、cron、hooks</strong>。简单说：普通对话由 session queue 编排；长期/后台工作由 tasks 和 Task Flow 编排；定时和事件触发由 cron/hooks/webhook 编排。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>触发。</strong>工作可以来自聊天消息、CLI、cron 定时任务、webhook、内部 hook，或者其他插件。</div>
+            <div class="flow-step" data-step="2"><strong>路由到 session。</strong>OpenClaw 根据 channel、account、peer、thread、agentId 等信息找到或创建 session，保证同一条对话线有稳定上下文。</div>
+            <div class="flow-step" data-step="3"><strong>排队。</strong>如果当前 session 已有 run 在执行，新消息会进入 queue，按配置决定等待、合并、steer 当前 run，或者作为后续 follow-up。</div>
+            <div class="flow-step" data-step="4"><strong>agent loop 执行。</strong>模型读取上下文、形成计划、调用工具、等待工具结果、继续推理，直到生成最终回复或进入后台任务。</div>
+            <div class="flow-step" data-step="5"><strong>工具层执行具体动作。</strong>例如 browser、exec、memory、message、sessions、cron、llm-task、lobster 等工具负责实际 I/O。</div>
+            <div class="flow-step" data-step="6"><strong>后台任务。</strong>长耗时或 detached work 会落到 background task ledger，便于状态追踪、取消、恢复和审计。</div>
+            <div class="flow-step" data-step="7"><strong>Task Flow 编排多步骤。</strong>如果任务是 A→B→C 或有分支、等待、重试、审批，Task Flow 负责 durable flow state、revision tracking，并协调多个 background tasks。</div>
+            <div class="flow-step" data-step="8"><strong>结果交付。</strong>最终结果通过 channel send path、message 工具、cron delivery、hook messages 或 task/flow 状态返回给用户。</div>
+          </div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Session queue 管“同一对话怎么排队”</h3>
+              <p>它解决的是并发问题：同一个 chat/thread 里同时来了多条消息，应该排队、合并、还是插入当前 run。这个层面偏实时对话编排。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Background Tasks 管“后台工作单元”</h3>
+              <p>task 是 detached work 的最小持久记录。它适合单个后台操作，比如跑一次报告、执行一次维护、处理一次长任务。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Task Flow 管“多步骤流程”</h3>
+              <p>Task Flow 在 tasks 之上，管理多步骤、可恢复、有状态的流程。它记录 flow state、revision，并能跨 gateway restart 继续追踪。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Cron / Hooks 管“什么时候触发”</h3>
+              <p>cron 负责定时触发；hooks 负责事件触发，例如 /new、/reset、compaction 前后、gateway startup/shutdown、message received/sent。</p>
+            </article>
+          </div>
+          <p>一个典型定时工作流可以这样理解：</p>
+          <pre><code>cron schedule
+  -> create/send run into a session
+  -> agent loop starts
+  -> tool calls / deterministic checks
+  -> background tasks for long-running steps
+  -> Task Flow tracks A -> B -> C
+  -> approval gate if needed
+  -> message delivery / task status / flow status</code></pre>
+          <div class="callout">一句话：OpenClaw 的 planning/workflow orchestration 是“session queue 处理实时对话，tasks 记录后台工作，Task Flow 管多步骤状态机，cron/hooks/webhook 负责触发，tools 负责执行”。</div>
+          <div class="refs">参考：<code class="inline">docs/automation/taskflow.md</code>、<code class="inline">docs/automation/tasks.md</code>、<code class="inline">docs/automation/cron-jobs.md</code>、<code class="inline">docs/automation/hooks.md</code>、<code class="inline">docs/concepts/messages.md</code>、<code class="inline">docs/concepts/queue.md</code>、<code class="inline">docs/concepts/agent-loop.md</code></div>
         </section>
 
 
