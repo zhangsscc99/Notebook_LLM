@@ -948,11 +948,12 @@
         <details class="toc-group" id="hermesSandboxTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent 沙箱</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-sandbox-overview">01 · 概览</a>
             <a href="#hermes-sandbox-editfile-flow">02 · 沙箱原理：edit_file / 多文件项目到底怎么改</a>
+            <a href="#hermes-sandbox-highlights">03 · 沙箱有哪些亮点功能，有什么意义</a>
           </div>
         </details>
       </nav>
@@ -2620,6 +2621,90 @@ execute_code
 
           <div class="callout">所以你问“是不是把项目直接复制到沙箱里去改，再把文件拷回来”：<strong>不一定，而且通常不是这么简单粗暴。Hermes 的核心是统一 backend 抽象；项目文件是否复制、挂载、同步，要看 backend 和配置。</strong></div>
           <div class="refs">参考：<code class="inline">/root/hermes/tools/environments/base.py:765-767</code>、<code class="inline">/root/hermes/tools/environments/modal.py</code>、<code class="inline">/root/hermes/tools/environments/daytona.py</code>、<code class="inline">/root/hermes/tools/file_operations.py</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py</code>、<code class="inline">/root/hermes/cli-config.yaml.example:160-198</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-sandbox-highlights">
+          <div class="section-header"><div class="index">HS3</div><h2>沙箱有哪些亮点功能，有什么意义</h2></div>
+          <p>Hermes 沙箱的亮点不只是“能开一个 Docker”。它真正有价值的地方，是把 agent 的命令执行、文件读写、后台进程、Python 脚本、RL rollout 放到同一个 backend 抽象下面。这样 agent 不是只能在你电脑上裸跑，而是可以按任务选择本地、容器、远端云沙箱或 SSH 机器。</p>
+          <div class="callout"><strong>一句话：</strong>Hermes 沙箱的意义是把“不可信、会改文件、会跑命令、会装依赖、会启动服务”的 agent 行为，变成可隔离、可复现、可迁移、可并行、可训练的数据生产流程。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>亮点 1：七类 terminal backend，不锁死在本机</h3>
+              <p>Hermes 支持 local、Docker、SSH、Singularity、Modal、Daytona、Vercel Sandbox。这个设计比“只支持本机 shell”强很多：轻任务可以 local 直跑；危险任务可以进 Docker；需要云端长期环境可以用 Modal / Daytona；需要 GPU 或公司内网资源可以走 SSH / Singularity。</p>
+              <p><strong>意义：</strong>agent 的运行位置可以按任务切换。它不是一个固定 IDE 插件，而是一个可以搬到 VPS、云沙箱、GPU 集群、远端服务器上的执行系统。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 2：terminal、file、process 共享同一个执行环境</h3>
+              <p>很多 agent 框架的问题是：命令在容器里跑，文件工具却还在宿主机读写，最后路径语义乱掉。Hermes 的思路是让文件操作、终端命令、后台进程都尽量跟随 active terminal backend。</p>
+              <p><strong>意义：</strong>如果 agent 在 Docker 的 <code class="inline">/workspace</code> 跑测试，它 patch 的也应该是同一个 <code class="inline">/workspace</code> 里的代码；这样“看到的文件”和“执行的代码”一致，工程任务不容易跑偏。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 3：Docker bind mount 是显式 opt-in</h3>
+              <p><code class="inline">docker_mount_cwd_to_workspace</code> 默认关闭。也就是说 Hermes 不会默认把你启动目录暴露给容器；你要让容器直接改宿主项目，需要明确打开挂载。</p>
+              <p><strong>意义：</strong>这是一个安全边界。默认更保守，需要真实改项目时再主动授权；否则 agent 在容器里乱写，影响范围主要留在容器文件系统里。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 4：云沙箱支持持久环境和低成本休眠</h3>
+              <p>README 里强调 Modal / Daytona 可以提供 serverless persistence：环境空闲时休眠，需要时再唤醒。代码层面也区分 persistent filesystem 和 live sandbox / long-running process。</p>
+              <p><strong>意义：</strong>这让 agent 可以做长周期任务：今天装依赖、clone 项目、跑一半，明天继续；同时不必一直占着一台昂贵机器。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 5：execute_code 有工具白名单和输出脱敏</h3>
+              <p><code class="inline">execute_code</code> 会生成受限的 <code class="inline">hermes_tools.py</code>，脚本只能调用允许的 Hermes 工具；输出还会做 secret redaction，避免 API key、token 等敏感信息进入模型上下文。</p>
+              <p><strong>意义：</strong>这不是普通的“让模型写段 Python 随便跑”。它把多步工具调用封装成可控脚本：能循环、能过滤大输出、能批处理，同时降低越权和泄密风险。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 6：后台任务有 sandbox PID 记录</h3>
+              <p>Hermes 的 process registry 会区分 host PID 和 sandbox PID。非 local 后端里启动的服务、测试、长进程，需要在对应沙箱内部轮询、停止、清理。</p>
+              <p><strong>意义：</strong>agent 可以启动 dev server、训练脚本、benchmark，然后后续继续查日志或停止它；不会只得到一个脱离上下文的本机进程号。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 7：RL / benchmark 可以按 task_id 隔离环境</h3>
+              <p>Hermes 的 terminal 环境里有 per-task override 机制。普通子 agent 可以共享父任务容器；但 RL rollout / benchmark 可以注册自己的 task_id、镜像、cwd，从而拿到独立沙箱。</p>
+              <p><strong>意义：</strong>这对 agentic RL 很关键。训练数据必须避免不同 rollout 互相污染，否则 reward、轨迹、文件状态都不干净。独立沙箱让每条训练轨迹更像真实独立任务。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>亮点 8：资源限制和镜像配置可控</h3>
+              <p>容器 / 云沙箱 backend 可以配置 CPU、memory、disk、image、cwd、persistent 等。RL 或 SWE benchmark 还能针对任务覆盖镜像。</p>
+              <p><strong>意义：</strong>同一个 agent 可以跑不同强度的任务：普通脚本给小资源；编译大型项目给更大磁盘；GPU / 特定依赖用定制镜像。这是工程化 agent 必须要有的调度能力。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>安全意义。</strong>把危险命令、依赖安装、未知代码运行限制在容器或远端沙箱里，减少对宿主机的破坏面。</div>
+            <div class="flow-step" data-step="2"><strong>工程意义。</strong>让 agent 的文件、命令、进程路径一致，减少“文件在 A 环境改、测试在 B 环境跑”的错位。</div>
+            <div class="flow-step" data-step="3"><strong>产品意义。</strong>用户可以从 Telegram / Slack / CLI 远程发任务，agent 在云沙箱里继续工作，不依赖用户电脑一直开着。</div>
+            <div class="flow-step" data-step="4"><strong>训练意义。</strong>RL rollout 可以隔离、并行、复现；每条轨迹都有干净环境，更适合做 agentic RL 数据。</div>
+            <div class="flow-step" data-step="5"><strong>成本意义。</strong>云沙箱可以休眠，空闲时少花钱；需要算力时再唤醒或换资源规格。</div>
+            <div class="flow-step" data-step="6"><strong>扩展意义。</strong>backend 抽象做好后，未来新增一个执行环境，不必重写所有 file / terminal / process 逻辑。</div>
+          </div>
+
+          <pre><code>Why Hermes sandbox matters
+
+without sandbox abstraction
+  -> model issues commands on one machine
+  -> files may be edited in another place
+  -> long tasks are hard to track
+  -> RL rollouts contaminate each other
+  -> unsafe code can damage host directly
+
+with Hermes backend abstraction
+  -> choose local / docker / modal / daytona / ssh per task
+  -> terminal + file + process share environment semantics
+  -> execute_code uses allowed tool RPC + secret redaction
+  -> benchmarks and RL can get isolated task sandboxes
+  -> cloud environments can persist or hibernate</code></pre>
+
+          <div class="callout"><strong>最终价值：</strong>沙箱让 Hermes 从“会调用工具的聊天机器人”升级成“能安全执行真实工程任务的 agent runtime”。没有这层，agentic RL 训练、SWE benchmark、多文件代码修改、远程长期任务都会非常脆弱。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/README.md:25</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:1-25</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:920-990</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:1107-1246</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:445-489</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:996-998</code>、<code class="inline">/root/hermes/cli-config.yaml.example:160-248</code></div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
