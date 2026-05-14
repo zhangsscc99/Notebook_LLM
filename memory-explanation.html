@@ -909,12 +909,13 @@
         <details class="toc-group" id="joyAgentTocGroup" open>
           <summary>
             <span class="toc-group-title">京东Joy Agent</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">4 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#joyagent-overview">01 · 概览介绍京东 JoyAgent-JDGenie</a>
             <a href="#joyagent-workflow-langgraph">02 · JoyAgent 工作流编排怎么做，用了什么 Agent 框架；如果用 LangGraph 怎么设计</a>
             <a href="#joyagent-workflow-architecture-image">03 · 用一张架构图解释 JoyAgent 工作流编排</a>
+            <a href="#joyagent-workflow-explainable-model">04 · JoyAgent 工作流编排怎么讲才容易记住：设计类似系统的思路</a>
           </div>
         </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
@@ -2370,6 +2371,138 @@ executor_subgraph:
 
           <div class="callout"><strong>图的结论：</strong>JoyAgent 的工作流编排核心是自研 Java agent runtime，把 ReAct、Plan-Solve、并行 Executor、工具集合、LLM function calling 和 SSE 产品输出串成一条端到端链路。</div>
           <div class="refs">参考：<code class="inline">GenieController.java</code>、<code class="inline">AgentContext.java</code>、<code class="inline">AgentHandlerFactory.java</code>、<code class="inline">PlanSolveHandlerImpl.java</code>、<code class="inline">ReactHandlerImpl.java</code>、<code class="inline">BaseAgent.java</code>、<code class="inline">ReActAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">SummaryAgent.java</code>、<code class="inline">ToolCollection.java</code></div>
+        </section>
+
+        <section class="section reveal" id="joyagent-workflow-explainable-model">
+          <div class="section-header"><div class="index">J4</div><h2>JoyAgent 工作流编排怎么讲才容易记住：设计类似系统的思路</h2></div>
+          <p>JoyAgent 的工作流编排看起来难，是因为它同时包含产品入口、Agent 模式、工具系统、并行任务、文件产物、流式输出。讲的时候不要一上来讲类名，要先讲一个简单模型：<strong>它像一个项目经理带团队交付报告</strong>。</p>
+          <div class="callout"><strong>最容易记的版本：</strong>JoyAgent = 前台接单员 + 项目经理 + 执行员工 + 工具仓库 + 汇报员。用户给任务，前台建工单，项目经理拆计划，执行员工调用工具干活，汇报员把过程和最终文件流式交给用户。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 用“公司干活”来讲</h3>
+              <p>把 JoyAgent 想成一个小公司：</p>
+              <ul>
+                <li><strong>前台：</strong><code class="inline">GenieController</code>，接用户请求，开 SSE 通道。</li>
+                <li><strong>工单：</strong><code class="inline">AgentContext</code>，记录 query、文件、工具、输出样式、任务状态。</li>
+                <li><strong>派单员：</strong><code class="inline">AgentHandlerFactory</code>，决定走 ReAct 还是 Plan-Solve。</li>
+                <li><strong>项目经理：</strong><code class="inline">PlanningAgent</code>，拆任务、更新计划。</li>
+                <li><strong>执行员工：</strong><code class="inline">ExecutorAgent</code> / <code class="inline">ReactImplAgent</code>，调用工具完成任务。</li>
+                <li><strong>工具仓库：</strong><code class="inline">ToolCollection</code>，管理搜索、代码解释器、报告、文件、MCP 工具。</li>
+                <li><strong>汇报员：</strong><code class="inline">SummaryAgent</code> + <code class="inline">SSEPrinter</code>，总结结果并推给前端。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 只记两种工作模式</h3>
+              <p>JoyAgent 的工作流可以先压缩成两种模式：</p>
+              <p><strong>简单任务：</strong>走 ReAct。一个 agent 边想边调用工具，直到完成。</p>
+              <p><strong>复杂任务：</strong>走 Plan-Solve。先由规划器拆计划，再由执行器做子任务，执行结果再反馈给规划器，循环直到 finish。</p>
+              <pre><code>简单任务：
+用户问题 -> ReActAgent -> 工具调用 -> 总结
+
+复杂任务：
+用户问题 -> PlanningAgent -> ExecutorAgent(s)
+        -> 结果反馈给 PlanningAgent -> 继续/结束
+        -> SummaryAgent</code></pre>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 讲给别人时，按 5 句话讲</h3>
+              <ol>
+                <li>JoyAgent 先把用户请求包装成一个 <code class="inline">AgentContext</code> 工单。</li>
+                <li>系统根据任务类型选择 ReAct 或 Plan-Solve 处理器。</li>
+                <li>ReAct 适合一步步试工具；Plan-Solve 适合先规划、再执行、再反馈。</li>
+                <li>执行器不自己硬编码能力，而是通过 <code class="inline">ToolCollection</code> 调搜索、代码解释器、报告、文件、MCP 工具。</li>
+                <li>所有过程通过 SSE 流式推回前端，最后由 SummaryAgent 汇总结果和交付文件。</li>
+              </ol>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 最核心的设计思想</h3>
+              <p>JoyAgent 的关键不是“有很多 agent 类”，而是把复杂任务拆成四层：</p>
+              <ul>
+                <li><strong>产品层：</strong>接请求、SSE、前端展示、输出样式。</li>
+                <li><strong>状态层：</strong>AgentContext 保存一次任务的公共状态。</li>
+                <li><strong>编排层：</strong>Handler + PlanningAgent + ExecutorAgent 控制流程。</li>
+                <li><strong>能力层：</strong>ToolCollection + genie-tool 提供真实工具能力。</li>
+              </ul>
+              <p>这四层分开后，系统才容易扩展：换工具不动 UI，换 agent 策略不动工具，换输出样式不动底层执行。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 为什么 Plan-Solve 更像真实项目管理</h3>
+              <p>复杂任务不能只靠一个 agent 一路 ReAct 到底，因为上下文会变乱，任务边界不清楚。Plan-Solve 的优势是把“想清楚怎么做”和“具体去做”分开。</p>
+              <p>PlanningAgent 像项目经理：决定下一批任务。ExecutorAgent 像员工：完成具体任务。SummaryAgent 像秘书：把过程和产物整理成用户能看的结果。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 为什么它能并行</h3>
+              <p>规划器返回多个任务时，用 <code class="inline">&lt;sep&gt;</code> 分隔。系统看到多个任务，就复制多个 ExecutorAgent 并发跑，等全部完成后把结果和 memory 合并回主执行器。</p>
+              <p>讲法很简单：<strong>项目经理一次派多个活，多名员工同时干，干完统一汇总。</strong></p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>接单。</strong>用户在 UI 提任务，后端创建 SSE 连接和 AgentContext。</div>
+            <div class="flow-step" data-step="2"><strong>选模式。</strong>HandlerFactory 判断走 ReAct 还是 Plan-Solve。</div>
+            <div class="flow-step" data-step="3"><strong>规划。</strong>复杂任务由 PlanningAgent 生成当前要做的 task；简单任务跳过规划直接 ReAct。</div>
+            <div class="flow-step" data-step="4"><strong>执行。</strong>ExecutorAgent / ReactImplAgent 调用 ToolCollection 里的工具。</div>
+            <div class="flow-step" data-step="5"><strong>反馈。</strong>工具结果写入 memory，并反馈给模型继续思考或给规划器更新计划。</div>
+            <div class="flow-step" data-step="6"><strong>交付。</strong>SummaryAgent 整理 taskSummary 和 fileList，SSEPrinter 推回前端。</div>
+          </div>
+
+          <pre><code>One-minute explanation
+
+JoyAgent is a productized multi-agent workflow.
+
+It does not start from "one agent answers everything".
+It starts from a work order:
+  AgentContext = query + files + tools + output style + product files
+
+Then it chooses a workflow:
+  REACT      = one worker thinks and uses tools repeatedly
+  PLAN_SOLVE = planner creates tasks, executors do tasks, planner checks again
+
+Tools are not hardcoded inside the model:
+  ToolCollection = built-in tools + MCP tools
+
+Outputs are not only text:
+  SummaryAgent returns task summary + generated files
+
+Frontend does not wait blindly:
+  SSE streams thoughts, plan, tool results, task summaries, final result</code></pre>
+
+          <h3>如果你要设计类似系统，按这个模板做</h3>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Step 1：先定义任务状态</h3>
+              <p>不要先写 agent prompt。先定义类似 <code class="inline">AgentContext</code> 的状态对象：用户问题、会话 id、可用工具、文件列表、当前任务、产物、输出风格、stream 通道。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Step 2：再定义模式路由</h3>
+              <p>把任务分成几类：简单问答走 ReAct；复杂交付走 Plan-Solve；数据分析走 DataAgent；固定流程走 Workflow。不要所有任务都塞进一个超级 agent。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Step 3：把工具做成注册表</h3>
+              <p>工具不要散落在 prompt 里。做一个 ToolCollection：工具名、描述、参数 schema、执行函数、权限/日志/错误处理。这样模型只负责选择工具，不负责工具实现。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Step 4：把复杂任务拆成 Planner / Executor / Summarizer</h3>
+              <p>Planner 管“下一步做什么”；Executor 管“怎么调用工具做”；Summarizer 管“怎么交付给用户”。这三个角色分开，复杂系统才不会混乱。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Step 5：设计流式事件</h3>
+              <p>产品级 agent 不能黑盒等待。至少要输出 plan、当前 task、tool thought、tool result、task summary、final result。JoyAgent 的 SSEPrinter 就是在做这件事。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Step 6：最后再考虑并行和恢复</h3>
+              <p>先把单任务跑通，再支持多个 task 并行。更进一步可以引入 LangGraph/checkpoint，把 JoyAgent 现在的 while loop 显式状态机化，方便恢复和人审。</p>
+            </article>
+          </div>
+
+          <div class="callout"><strong>记忆口诀：</strong>一张工单，一个派单员，两种模式，三个角色，一组工具，一个流式交付。工单是 AgentContext；派单员是 HandlerFactory；两种模式是 ReAct / Plan-Solve；三个角色是 Planner / Executor / Summary；工具是 ToolCollection；交付是 SSE。</div>
+          <div class="refs">参考：<code class="inline">AgentContext.java</code>、<code class="inline">AgentHandlerFactory.java</code>、<code class="inline">PlanSolveHandlerImpl.java</code>、<code class="inline">ReactHandlerImpl.java</code>、<code class="inline">BaseAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">SummaryAgent.java</code>、<code class="inline">ToolCollection.java</code>、<code class="inline">SSEPrinter.java</code></div>
         </section>
 
         <section class="section reveal" id="planning-s1">
