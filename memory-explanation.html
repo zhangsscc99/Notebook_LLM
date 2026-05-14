@@ -909,11 +909,12 @@
         <details class="toc-group" id="joyAgentTocGroup" open>
           <summary>
             <span class="toc-group-title">京东Joy Agent</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#joyagent-overview">01 · 概览介绍京东 JoyAgent-JDGenie</a>
             <a href="#joyagent-workflow-langgraph">02 · JoyAgent 工作流编排怎么做，用了什么 Agent 框架；如果用 LangGraph 怎么设计</a>
+            <a href="#joyagent-workflow-architecture-image">03 · 用一张架构图解释 JoyAgent 工作流编排</a>
           </div>
         </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
@@ -2194,6 +2195,181 @@ executor_subgraph:
 
           <div class="callout"><strong>设计结论：</strong>JoyAgent 当前是自研 Java agent loop；如果用 LangGraph，核心不是换语言炫技，而是把它已有的 PlanSolve、ReAct、并行 Executor、Summary、SSE 事件、productFiles 状态显式图化。这样复杂任务会更可恢复、更可观测，也更容易扩展成人审、失败重试和多工作流。</div>
           <div class="refs">参考：<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/controller/GenieController.java</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/service/impl/PlanSolveHandlerImpl.java</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/service/impl/ReactHandlerImpl.java</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/agent/agent/BaseAgent.java</code>、<code class="inline">ReActAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">ToolCollection.java</code>、<code class="inline">LLM.java</code></div>
+        </section>
+
+        <section class="section reveal" id="joyagent-workflow-architecture-image">
+          <div class="section-header"><div class="index">J3</div><h2>用一张架构图解释 JoyAgent 工作流编排</h2></div>
+          <p>下面这张图按源码里的真实分层画：上面是产品入口和 SSE 流式层，中间是 Java 自研 Agent runtime，下面是工具服务和外部能力。理解 JoyAgent 编排时，重点看两条主路径：<strong>REACT 单 agent 工具循环</strong>和<strong>PLAN_SOLVE 规划-执行-总结循环</strong>。</p>
+
+          <div class="callout"><strong>读图方式：</strong>左到右是请求流；中间橙色区域是 JoyAgent 自研 Java Agent 框架；右侧是 LLM function calling；底部是 Python 工具服务、MCP、数据/检索/文件产物。</div>
+
+          <div style="margin: 22px 0; overflow-x: auto; border: 1px solid rgba(255,255,255,.08); border-radius: 22px; background: rgba(4,8,12,.36); padding: 16px;">
+            <svg viewBox="0 0 1260 760" width="100%" role="img" aria-labelledby="joyArchTitle joyArchDesc" style="min-width: 980px; display:block;">
+              <title id="joyArchTitle">JoyAgent-JDGenie workflow orchestration architecture</title>
+              <desc id="joyArchDesc">Architecture diagram showing UI request, Spring Boot backend, AgentContext, handler routing, ReAct and Plan-Solve flows, LLM function calling, tools, Python services and SSE streaming.</desc>
+              <defs>
+                <linearGradient id="joyGold" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#e7c98b" stop-opacity=".96"/>
+                  <stop offset="100%" stop-color="#8ad2d8" stop-opacity=".88"/>
+                </linearGradient>
+                <linearGradient id="joyPanel" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#17202b"/>
+                  <stop offset="100%" stop-color="#0d141d"/>
+                </linearGradient>
+                <filter id="joyShadow" x="-20%" y="-20%" width="140%" height="140%">
+                  <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity=".34"/>
+                </filter>
+                <marker id="joyArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+                  <path d="M2,2 L10,6 L2,10 Z" fill="#e7c98b"/>
+                </marker>
+                <marker id="joyCyanArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+                  <path d="M2,2 L10,6 L2,10 Z" fill="#8ad2d8"/>
+                </marker>
+                <style>
+                  .joy-box{fill:url(#joyPanel);stroke:rgba(231,201,139,.42);stroke-width:1.4;filter:url(#joyShadow)}
+                  .joy-box2{fill:#101923;stroke:rgba(138,210,216,.42);stroke-width:1.4;filter:url(#joyShadow)}
+                  .joy-box3{fill:#121922;stroke:rgba(255,255,255,.16);stroke-width:1.2}
+                  .joy-title{font:700 20px "Avenir Next","PingFang SC",sans-serif;fill:#fff6dd}
+                  .joy-sub{font:500 13px "Avenir Next","PingFang SC",sans-serif;fill:#aebdcc}
+                  .joy-small{font:600 12px "Avenir Next","PingFang SC",sans-serif;fill:#d7e7ef}
+                  .joy-label{font:700 13px "Avenir Next","PingFang SC",sans-serif;fill:#0d1117}
+                  .joy-line{stroke:#e7c98b;stroke-width:2;fill:none;marker-end:url(#joyArrow)}
+                  .joy-line2{stroke:#8ad2d8;stroke-width:2;fill:none;marker-end:url(#joyCyanArrow)}
+                  .joy-dash{stroke:#8ad2d8;stroke-width:2;stroke-dasharray:7 7;fill:none;marker-end:url(#joyCyanArrow)}
+                </style>
+              </defs>
+
+              <rect x="20" y="20" width="1220" height="720" rx="28" fill="#0a0f15" stroke="rgba(255,255,255,.08)"/>
+              <text x="50" y="62" class="joy-title">JoyAgent-JDGenie 工作流编排总图</text>
+              <text x="50" y="86" class="joy-sub">UI → Spring Boot 编排层 → 自研 Agent Runtime → LLM function calling → 工具服务 / 文件产物 → SSE 回前端</text>
+
+              <!-- Entry lane -->
+              <rect x="50" y="125" width="210" height="92" rx="18" class="joy-box"/>
+              <text x="76" y="160" class="joy-title">UI 前端</text>
+              <text x="76" y="184" class="joy-sub">React / Vite / AntD</text>
+              <text x="76" y="204" class="joy-sub">用户 query + outputStyle</text>
+
+              <rect x="310" y="125" width="260" height="92" rx="18" class="joy-box2"/>
+              <text x="336" y="160" class="joy-title">GenieController</text>
+              <text x="336" y="184" class="joy-sub">/AutoAgent / queryAgentStreamIncr</text>
+              <text x="336" y="204" class="joy-sub">SseEmitter + heartbeat</text>
+
+              <rect x="620" y="125" width="260" height="92" rx="18" class="joy-box2"/>
+              <text x="646" y="160" class="joy-title">AgentContext</text>
+              <text x="646" y="184" class="joy-sub">query / requestId / printer</text>
+              <text x="646" y="204" class="joy-sub">productFiles / toolCollection</text>
+
+              <rect x="930" y="125" width="250" height="92" rx="18" class="joy-box"/>
+              <text x="956" y="160" class="joy-title">AgentHandlerFactory</text>
+              <text x="956" y="184" class="joy-sub">按 agentType 选择 handler</text>
+              <text x="956" y="204" class="joy-sub">REACT / PLAN_SOLVE</text>
+
+              <path d="M260 171 H310" class="joy-line"/>
+              <path d="M570 171 H620" class="joy-line"/>
+              <path d="M880 171 H930" class="joy-line"/>
+
+              <!-- Runtime boundary -->
+              <rect x="50" y="260" width="1130" height="275" rx="26" fill="rgba(231,201,139,.055)" stroke="rgba(231,201,139,.22)" stroke-width="1.5"/>
+              <text x="76" y="294" class="joy-title">自研 Java Agent Runtime</text>
+              <text x="76" y="316" class="joy-sub">BaseAgent.run while loop + ReActAgent.think/act + ToolCollection + SummaryAgent</text>
+
+              <!-- React path -->
+              <rect x="92" y="350" width="230" height="120" rx="18" class="joy-box3"/>
+              <text x="116" y="382" class="joy-title">REACT 路径</text>
+              <text x="116" y="408" class="joy-sub">ReactHandlerImpl</text>
+              <text x="116" y="429" class="joy-sub">ReactImplAgent.run()</text>
+              <text x="116" y="450" class="joy-sub">think → act → repeat</text>
+
+              <rect x="382" y="350" width="230" height="120" rx="18" class="joy-box3"/>
+              <text x="406" y="382" class="joy-title">PLAN_SOLVE 路径</text>
+              <text x="406" y="408" class="joy-sub">PlanSolveHandlerImpl</text>
+              <text x="406" y="429" class="joy-sub">SOP recall</text>
+              <text x="406" y="450" class="joy-sub">Planner ↔ Executor</text>
+
+              <rect x="680" y="330" width="200" height="82" rx="16" class="joy-box"/>
+              <text x="708" y="362" class="joy-title">PlanningAgent</text>
+              <text x="708" y="386" class="joy-sub">生成/更新 plan</text>
+
+              <rect x="680" y="445" width="200" height="82" rx="16" class="joy-box"/>
+              <text x="708" y="477" class="joy-title">ExecutorAgent(s)</text>
+              <text x="708" y="501" class="joy-sub">多任务可并发执行</text>
+
+              <rect x="940" y="380" width="200" height="100" rx="16" class="joy-box2"/>
+              <text x="968" y="414" class="joy-title">SummaryAgent</text>
+              <text x="968" y="438" class="joy-sub">汇总 memory</text>
+              <text x="968" y="459" class="joy-sub">关联 productFiles</text>
+
+              <path d="M930 217 C930 250 212 248 207 350" class="joy-line"/>
+              <path d="M1055 217 C1055 250 497 250 497 350" class="joy-line"/>
+              <path d="M612 410 C650 410 650 371 680 371" class="joy-line"/>
+              <path d="M780 412 V445" class="joy-line"/>
+              <path d="M680 486 C632 486 632 371 680 371" class="joy-dash"/>
+              <path d="M880 486 C915 486 915 430 940 430" class="joy-line"/>
+              <path d="M322 410 H382" class="joy-line2"/>
+              <path d="M322 430 C560 560 850 560 940 454" class="joy-line2"/>
+
+              <!-- LLM / tools lane -->
+              <rect x="50" y="575" width="1130" height="125" rx="26" fill="rgba(138,210,216,.055)" stroke="rgba(138,210,216,.22)" stroke-width="1.5"/>
+              <text x="76" y="608" class="joy-title">外部能力和工具执行层</text>
+
+              <rect x="105" y="630" width="190" height="48" rx="14" fill="url(#joyGold)"/>
+              <text x="130" y="660" class="joy-label">LLM.askTool</text>
+
+              <rect x="345" y="630" width="190" height="48" rx="14" fill="#12212b" stroke="rgba(138,210,216,.4)"/>
+              <text x="372" y="660" class="joy-small">ToolCollection / MCP</text>
+
+              <rect x="585" y="630" width="190" height="48" rx="14" fill="#12212b" stroke="rgba(138,210,216,.4)"/>
+              <text x="613" y="660" class="joy-small">genie-tool Python</text>
+
+              <rect x="825" y="630" width="190" height="48" rx="14" fill="#12212b" stroke="rgba(138,210,216,.4)"/>
+              <text x="852" y="660" class="joy-small">Report / PPT / Files</text>
+
+              <path d="M207 470 C207 535 200 575 200 630" class="joy-line2"/>
+              <path d="M497 470 C497 535 440 575 440 630" class="joy-line2"/>
+              <path d="M295 654 H345" class="joy-line2"/>
+              <path d="M535 654 H585" class="joy-line2"/>
+              <path d="M775 654 H825" class="joy-line2"/>
+              <path d="M1015 654 C1140 654 1145 520 1040 480" class="joy-line"/>
+
+              <!-- SSE return -->
+              <path d="M940 430 C790 260 500 250 310 205" class="joy-dash"/>
+              <text x="705" y="265" class="joy-sub">SSE events: plan_thought / tool_thought / tool_result / task_summary / result</text>
+            </svg>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>图里最重要的 3 条线</h3>
+              <ul>
+                <li><strong>请求线：</strong>UI → Controller → AgentContext → HandlerFactory。</li>
+                <li><strong>执行线：</strong>Handler → React 或 PlanSolve → LLM.askTool → ToolCollection。</li>
+                <li><strong>回传线：</strong>Printer/SSE 把 plan、tool thought、tool result、summary、result 流式推回前端。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>为什么说它是产品级编排</h3>
+              <p>因为 JoyAgent 不只是模型和工具循环。它还处理前端交互、SSE 心跳、输出样式、文件交付、MCP 工具接入、并行子任务、SOP 召回、最终总结。这些都属于“能不能成为完整产品”的编排部分。</p>
+            </article>
+          </div>
+
+          <pre><code>Architecture reading order
+
+1. User submits query in UI
+2. GenieController creates SseEmitter and AgentContext
+3. ToolCollection is built from built-in tools + MCP tools
+4. AgentHandlerFactory selects REACT or PLAN_SOLVE
+5. REACT:
+     ReactImplAgent loops think/act until no tool calls
+6. PLAN_SOLVE:
+     PlanningAgent creates tasks
+     ExecutorAgent executes tasks
+     multiple tasks can run in parallel
+     results go back to planner
+7. SummaryAgent summarizes memory and product files
+8. SSEPrinter streams all visible events back to UI</code></pre>
+
+          <div class="callout"><strong>图的结论：</strong>JoyAgent 的工作流编排核心是自研 Java agent runtime，把 ReAct、Plan-Solve、并行 Executor、工具集合、LLM function calling 和 SSE 产品输出串成一条端到端链路。</div>
+          <div class="refs">参考：<code class="inline">GenieController.java</code>、<code class="inline">AgentContext.java</code>、<code class="inline">AgentHandlerFactory.java</code>、<code class="inline">PlanSolveHandlerImpl.java</code>、<code class="inline">ReactHandlerImpl.java</code>、<code class="inline">BaseAgent.java</code>、<code class="inline">ReActAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">SummaryAgent.java</code>、<code class="inline">ToolCollection.java</code></div>
         </section>
 
         <section class="section reveal" id="planning-s1">
