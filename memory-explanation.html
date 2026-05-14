@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OpenClaw Memory 系统导读</title>
+  <title>开源顶级Agent项目解读</title>
   <style>
     :root {
       --bg: #0d1117;
@@ -598,9 +598,15 @@
       transition: opacity .7s ease, transform .7s ease;
     }
 
-    .reveal.visible {
+    .reveal.visible,
+    .reveal:target {
       opacity: 1;
       transform: translateY(0);
+    }
+
+    .section:target {
+      outline: 1px solid rgba(231, 201, 139, .45);
+      box-shadow: 0 30px 80px rgba(0,0,0,.42), 0 0 0 6px rgba(231, 201, 139, .08);
     }
 
     @media (max-width: 1080px) {
@@ -795,12 +801,12 @@
   <div class="shell">
     <header class="hero reveal visible">
       <div class="hero-card">
-        <div class="eyebrow">OpenClaw · Memory Architecture</div>
+        <div class="eyebrow">Open Source · Top Agent Projects</div>
         <div class="hero-grid">
           <div>
-            <h1>OpenClaw Memory 系统导读</h1>
+            <h1>开源顶级Agent项目解读</h1>
             <p class="lead">
-              这不是“模型脑内神秘记忆”，而是一套<strong>显式、可追踪、文件驱动、插件化</strong>的记忆系统：把信息落盘、切块、建索引、检索、回读，并在 compaction 前自动做一次记忆保全。
+              这里不是只讲一个功能点，而是持续拆解多个<strong>开源顶级 Agent 项目</strong>的核心设计：包括记忆系统、工作流编排、skills 机制、agentic RL、训练闭环，以及它们背后的工程取舍与能力边界。
             </p>
             <div class="pill-list">
               <span class="pill">文件即记忆</span>
@@ -875,10 +881,10 @@
             <a href="#s34">34 · 分层记忆和会话怎么记住</a>
           </div>
         </details>
-        <details class="toc-group" id="claudeWorkflowTocGroup">
+        <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">6 sections</span>
+            <span class="toc-count">7 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -887,6 +893,7 @@
             <a href="#claude-workflow-4">04 · 工具执行与权限</a>
             <a href="#claude-workflow-5">05 · 子代理与后台任务</a>
             <a href="#claude-workflow-6">06 · Coordinator 多 worker 编排</a>
+            <a href="#claude-workflow-7">07 · LangGraph 复刻编排</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -915,6 +922,36 @@
           </summary>
           <div class="toc-group-links">
             <a href="#qwen-pipeline">01 · 训练 pipeline 全流程</a>
+          </div>
+        </details>
+        <details class="toc-group" id="hermesAgenticRlTocGroup" open>
+          <summary>
+            <span class="toc-group-title">Hermes Agent Agentic RL</span>
+            <span class="toc-count">3 sections</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#hermes-agentic-rl-overview">01 · Hermes Agent 的 agentic RL：skills 外层 vs 训练内层</a>
+            <a href="#hermes-skills-vs-agentic-rl">02 · skills vs agentic RL：优势对比与瓶颈弥补</a>
+            <a href="#hermes-rl-weight-mechanics">03 · Hermes agentic RL：权重怎么改、LoRA 加哪、训练后怎么变成模型 API</a>
+          </div>
+        </details>
+        <details class="toc-group" id="hermesWorkflowTocGroup" open>
+          <summary>
+            <span class="toc-group-title">Hermes agent工作流编排</span>
+            <span class="toc-count">2 sections</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#hermes-workflow-linear">01 · 怎么思考设计 Hermes 的这个工作流：线性顺序说</a>
+            <a href="#hermes-workflow-langgraph">02 · 如果用 LangGraph / LangChain 重新设计 Hermes 工作流编排</a>
+          </div>
+        </details>
+        <details class="toc-group" id="hermesSandboxTocGroup" open>
+          <summary>
+            <span class="toc-group-title">Hermes Agent 沙箱</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#hermes-sandbox-overview">01 · 概览</a>
           </div>
         </details>
       </nav>
@@ -2020,6 +2057,475 @@ GRPO/RLHF optimized model</code></pre>
           <div class="refs">参考：<code class="inline">src/qwen_rlhf/README.md</code>、<code class="inline">src/qwen_rlhf/configs/*.yaml</code>、<code class="inline">src/qwen_rlhf/scripts/build_semisynth_dataset.py</code>、<code class="inline">src/qwen_rlhf/scripts/train_sft.py</code>、<code class="inline">src/qwen_rlhf/scripts/train_grpo.py</code>、<code class="inline">src/qwen_rlhf/src/qwen_edit/*.py</code></div>
         </section>
 
+        <section class="section reveal" id="hermes-agentic-rl-overview">
+          <div class="section-header"><div class="index">H1</div><h2>Hermes Agent 的 agentic RL：skills 外层 vs 训练内层</h2></div>
+          <p>按你这个划分，更准确的说法是：</p>
+          <div class="callout"><strong>外层</strong>不是普通 orchestration，而是<strong>agent 应用层面的拟 agentic RL</strong>，核心就是 <strong>skills 机制</strong>；<strong>内层</strong>才是<strong>真正的 agentic RL 训练闭环</strong>。</div>
+          <div class="flow">
+            <div class="flow-step" data-step="1">外层 skills 给 agent 一套任务化能力包：专门 prompt、工作流程、工具使用套路、约束、最佳实践。</div>
+            <div class="flow-step" data-step="2">它会让 agent 看起来越来越像“学会了某种能力”——比如会排查、会研究、会搭建、会编排。</div>
+            <div class="flow-step" data-step="3">但这层本质上没有 reward 驱动的参数更新，所以它更接近应用层的“拟 agentic RL”或“伪 agentic 强化实践”。</div>
+            <div class="flow-step" data-step="4">真正的 agentic RL 发生在训练内层：rollout → reward → batch → advantage → loss update → 新 policy → 下一轮 rollout。</div>
+          </div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>外层：skills 机制 = 应用层拟 agentic RL</h3>
+              <ul>
+                <li>Hermes 的 <code class="inline">skills/</code> 和 <code class="inline">optional-skills/</code> 提供一套可插拔能力包。</li>
+                <li>每个 skill 本质上是在给 agent 注入<strong>任务结构、流程模板、工具套路、领域知识、操作边界</strong>。</li>
+                <li>所以 agent 用了 skill 以后，会表现得像“经过某类任务训练”，但其实主要是<strong>prompt/runtime/tooling 层面的行为塑形</strong>。</li>
+                <li>这层很像“应用层强化”：不断把 agent 包装得更会做事，但并没有发生真正的 reward-driven weight update。</li>
+                <li>因此如果你要叫它外层，最准确就是：<strong>skills 是 Hermes 在 agent 应用层做的拟 agentic RL 机制</strong>。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>内层：真 agentic RL 训练</h3>
+              <ul>
+                <li>真正的训练核心在 <code class="inline">tinker-atropos</code> 和 Atropos environment。</li>
+                <li>示例环境 <code class="inline">gsm8k_tinker.py</code> 会 <code class="inline">collect_trajectories()</code>，一次采多条回答并保留 token / mask / logprob。</li>
+                <li><code class="inline">score()</code> 根据答案正确性给 reward；trainer 再从 <code class="inline">/batch</code> 拉回 rollout。</li>
+                <li><code class="inline">pad_data_to_good_offset()</code> 构造 <code class="inline">advantage = score - group_mean</code>。</li>
+                <li><code class="inline">train_step()</code> 调 <code class="inline">forward_backward_async(..., loss_fn=&quot;importance_sampling&quot;)</code> 和 <code class="inline">optim_step_async</code>，完成真正的参数更新。</li>
+                <li>更新后的 sampler weights 会立刻进入下一轮 rollout，所以这里存在真实的 policy improvement 闭环。</li>
+              </ul>
+            </article>
+          </div>
+          <pre><code>外层（应用层拟 agentic RL）
+  skills
+    -> prompt scaffolding
+    -> workflow template
+    -> tool-use routine
+    -> domain-specific operating pattern
+    -> 让 agent 看起来更会做事
+    -> 但不直接更新模型参数
+
+内层（真正的 agentic RL）
+  rollout
+    -> reward
+    -> batch
+    -> advantage = score - group_mean
+    -> importance_sampling loss
+    -> optimizer step
+    -> new sampler weights
+    -> next rollout</code></pre>
+          <div class="callout">所以最贴切的总结是：<strong>Hermes 的外层 agentic 感主要来自 skills 机制；Hermes 的内层 agentic RL 才来自 Tinker-Atropos / Atropos 这套真正的训练闭环。</strong></div>
+          <div class="refs">参考：<code class="inline">/root/hermes/skills/</code>、<code class="inline">/root/hermes/optional-skills/</code>、<code class="inline">/root/hermes/rl_cli.py</code>、<code class="inline">/root/hermes/tools/rl_training_tool.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/environments/gsm8k_tinker.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/trainer.py</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-skills-vs-agentic-rl">
+          <div class="section-header"><div class="index">H2</div><h2>skills vs agentic RL：这两者各自优势是什么，agentic RL 能补 skills 什么短板</h2></div>
+          <p><strong>skills 强在快、便宜、可控、可解释；agentic RL 强在把“会不会做”真正内化到 policy 里。</strong> 两者不是互斥关系，更像两层：skills 是应用层行为塑形，agentic RL 是训练层能力塑形。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>skills 的优势</h3>
+              <ul>
+                <li><strong>上线快：</strong>写一个 skill 就能改 agent 行为，不需要重新训练模型。</li>
+                <li><strong>便宜：</strong>主要成本是 prompt、流程和工具设计，不需要大规模 rollout / reward / update。</li>
+                <li><strong>可控：</strong>你可以明确规定步骤、边界、禁区、工具顺序和输出格式。</li>
+                <li><strong>可解释：</strong>agent 为什么这么做，通常能直接从 skill 文本和工具流程里读出来。</li>
+                <li><strong>适合长尾场景：</strong>某个垂类任务、某个平台接入、某个操作手册，优先用 skill 很划算。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>skills 的瓶颈</h3>
+              <ul>
+                <li><strong>本质仍是外部脚手架：</strong>能力更多是“被提示出来”，不是“长进模型里”。</li>
+                <li><strong>迁移性有限：</strong>换一个相邻任务、换一种输入分布，skill 往往要重写或补丁式叠加。</li>
+                <li><strong>上下文依赖重：</strong>很多表现来自 prompt、例子、流程约束，一旦上下文变形，行为会漂。</li>
+                <li><strong>难以持续自我改进：</strong>做完一次任务后，模型参数没变，下次还得靠同样脚手架重新扶着走。</li>
+                <li><strong>组合复杂度会上升：</strong>skill 越多，交叉覆盖、冲突、维护成本会越来越高。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>agentic RL 的优势</h3>
+              <ul>
+                <li><strong>把行为写进 policy：</strong>不是每次提醒模型怎么做，而是通过 reward 和 update 让它逐步学会怎么做。</li>
+                <li><strong>更适合多步决策：</strong>尤其是 rollout 后能看到任务结果、环境反馈、工具后果的场景。</li>
+                <li><strong>可利用结果信号持续优化：</strong>答对/答错、成败、效率、可执行性，都能变成 reward。</li>
+                <li><strong>能减少对外部脚手架的依赖：</strong>学进模型后的能力，理论上更稳，不必事事靠长 prompt 扶着。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>agentic RL 能补 skills 哪些短板</h3>
+              <ul>
+                <li><strong>补“只会照说明做、不会真正长本事”：</strong>skills 像训练手册，RL 才是在训练能力本身。</li>
+                <li><strong>补“泛化差”：</strong>如果 reward 设计得好，模型能学到比单个 skill 更抽象的决策模式。</li>
+                <li><strong>补“每次都要重新扶”：</strong>参数更新后，下一次 rollout 天然带着上一次学到的改进。</li>
+                <li><strong>补“行为不能闭环优化”：</strong>skills 能规定流程，但不能自动根据结果改 policy；RL 可以。</li>
+                <li><strong>补“复杂多步任务靠 prompt 很脆”：</strong>当任务真的是 sequential decision making，RL 比纯 skill 更像正解。</li>
+              </ul>
+            </article>
+          </div>
+          <pre><code>skills
+  = runtime scaffolding
+  = prompt / workflow / tool routine / guardrails
+  = 快、便宜、可控
+  = 但能力主要在外面
+
+agentic RL
+  = rollout -> reward -> update
+  = 能力通过训练写进 policy
+  = 慢、贵、复杂
+  = 但能持续改进并弥补 skills 的外部脚手架瓶颈</code></pre>
+          <div class="callout">最短总结：<strong>skills 解决“先把 agent 做得像会做”；agentic RL 解决“让 agent 真的越来越会做”。</strong></div>
+          <div class="refs">参考：<code class="inline">/root/hermes/skills/</code>、<code class="inline">/root/hermes/optional-skills/</code>、<code class="inline">/root/hermes/rl_cli.py</code>、<code class="inline">/root/hermes/tools/rl_training_tool.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/environments/gsm8k_tinker.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/trainer.py</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-rl-weight-mechanics">
+          <div class="section-header"><div class="index">H3</div><h2>Hermes agentic RL：权重怎么改、LoRA 加哪、训练后怎么变成模型 API</h2></div>
+          <p>如果把问题收缩到“<strong>模型提升原理</strong>”，Hermes 这套 agentic RL 的关键不是 skill 文本，而是：<strong>在固定底座模型上创建一个 LoRA 训练客户端，让 rollout 的 reward 信号通过 importance sampling loss 回流到 LoRA 参数，再把新权重立刻切到采样端</strong>。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">先确定底座模型 <code class="inline">base_model</code> 和 LoRA rank <code class="inline">lora_rank</code>。</div>
+            <div class="flow-step" data-step="2">通过 Tinker SDK 的 <code class="inline">ServiceClient.create_lora_training_client_async(base_model=..., rank=...)</code> 创建 LoRA 训练客户端。</div>
+            <div class="flow-step" data-step="3">environment 生成 rollout，score 出 reward，Atropos API 聚合成 batch。</div>
+            <div class="flow-step" data-step="4">trainer 用 <code class="inline">forward_backward_async(..., loss_fn=&quot;importance_sampling&quot;)</code> 和 <code class="inline">optim_step_async(...)</code> 更新 LoRA 参数。</div>
+            <div class="flow-step" data-step="5">训练后通过 <code class="inline">save_weights_for_sampler(...)</code> 导出一个新的 sampler 权重路径，再用 <code class="inline">create_sampling_client(model_path=...)</code> 切到新模型。</div>
+            <div class="flow-step" data-step="6">最后用本地 FastAPI 包一层，暴露成 <code class="inline">/v1/chat/completions</code>、<code class="inline">/v1/completions</code>、<code class="inline">/generate</code> 这样的训练后模型 API。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 模型权重到底怎么被修改</h3>
+              <p>在这套实现里，<strong>不是直接全量更新 base model</strong>，而是走 LoRA 训练路径。trainer 初始化时会调用：</p>
+              <pre><code>self.training_client = await self.service_client.create_lora_training_client_async(
+    base_model=self.base_model,
+    rank=self.lora_rank,
+)</code></pre>
+              <p>这说明真实被优化的是 <strong>LoRA adapter 权重</strong>，不是整个底座模型全参。后续每个 step 的更新来自：</p>
+              <pre><code>await self.training_client.forward_backward_async(data, loss_fn="importance_sampling")
+await self.training_client.optim_step_async(adam_params)</code></pre>
+              <p>也就是说：rollout 先形成训练 datum，loss 回传到 LoRA 参数，再做优化器 step。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. LoRA 层加在哪里</h3>
+              <p><strong>当前 Hermes / tinker-atropos 这份代码并没有显式展开“LoRA 插到哪几个 projection 层”</strong>。它只暴露了两个关键输入：</p>
+              <ul>
+                <li><code class="inline">base_model</code></li>
+                <li><code class="inline">lora_rank</code></li>
+              </ul>
+              <p>真正把 LoRA adapter 注入到底座模型哪些模块，是由 <strong>Tinker 的 LoRA training client</strong> 在其内部完成的；这部分在当前仓库里是 SDK / 服务端黑箱，没有像常见 PEFT 配置那样把 <code class="inline">q_proj / v_proj / o_proj</code> 明文列出来。</p>
+              <div class="callout">所以准确说法是：<strong>Hermes 代码能看到“用了 LoRA + rank 多少”，但看不到“LoRA 精确插在哪些层”</strong>；层级注入细节被 Tinker API 抽象掉了。</div>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 调用什么 API 做 RL</h3>
+              <p>这里其实有两套 API 在配合：</p>
+              <ul>
+                <li><strong>Atropos 本地 API：</strong>trainer 会先向 <code class="inline">{atropos_api_url}/register</code> 注册，再从 <code class="inline">{atropos_api_url}/batch</code> 拉 rollout batch。</li>
+                <li><strong>Tinker SDK API：</strong><code class="inline">create_lora_training_client_async</code>、<code class="inline">forward_backward_async</code>、<code class="inline">optim_step_async</code>、<code class="inline">save_weights_for_sampler</code>、<code class="inline">create_sampling_client</code>。</li>
+              </ul>
+              <p>所以 RL 不是直接打一条“train()”完事，而是 <strong>Atropos 负责环境/rollout，Tinker 负责参数优化和采样客户端</strong>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 模型提升原理是什么</h3>
+              <p>提升的核心机制是：对同一问题采多条 rollout，依据 reward 算出组内相对优势：</p>
+              <pre><code>advantage = score - group_mean</code></pre>
+              <p>然后只对生成段做训练，把参考 logprob、target token、advantage 一起塞进 datum，交给 Tinker 的 <code class="inline">importance_sampling</code> loss。于是模型不是只学“答案对不对”，而是在学：<strong>什么样的生成轨迹更值得被提高概率</strong>。</p>
+              <div class="callout">这就是 agentic RL 相比 skill 更深的一点：它在改 policy 本身，而不是只在 runtime 外面加操作说明书。</div>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 训练后怎么“部署”成可调用模型</h3>
+              <p>这份实现里，训练过程中每一步更新后都会：</p>
+              <pre><code>new_path = self.training_client.save_weights_for_sampler(name=f"step_{step+1}").result().path
+self.current_sampling_client = self.service_client.create_sampling_client(model_path=new_path)</code></pre>
+              <p>也就是先得到一个新的 <code class="inline">model_path</code>（本质上是 Tinker 里的 sampler 权重路径），再创建新的 sampling client。训练结束时还会打印：</p>
+              <pre><code>tinker://&lt;training_run_id&gt;/sampler_weights/final</code></pre>
+              <p>这个路径就是训练后模型权重的句柄。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 训练好后怎么封装成模型 API</h3>
+              <p>仓库里不是单独写一个“云上部署服务”，而是直接在 trainer 进程里起一个本地 FastAPI 包装层：</p>
+              <ul>
+                <li><code class="inline">/v1/completions</code></li>
+                <li><code class="inline">/v1/chat/completions</code></li>
+                <li><code class="inline">/generate</code></li>
+              </ul>
+              <p>这些 endpoint 内部都会调用：</p>
+              <pre><code>trainer.current_sampling_client.sample_async(...)</code></pre>
+              <p>因此训练后的模型 API 封装方式就是：<strong>把最新的 sampling client 挂到一个 OpenAI-compatible / SGLang-compatible 的本地推理壳上</strong>。</p>
+            </article>
+          </div>
+
+          <pre><code>base_model + lora_rank
+  -> create_lora_training_client_async(...)
+  -> rollout batch from Atropos
+  -> forward_backward_async(loss_fn="importance_sampling")
+  -> optim_step_async(...)
+  -> save_weights_for_sampler(...)
+  -> create_sampling_client(model_path=new_path)
+  -> FastAPI wrapper
+      -> /v1/completions
+      -> /v1/chat/completions
+      -> /generate</code></pre>
+
+          <p>如果要把训练后的权重单独导出来，仓库还提供了下载脚本：它通过 <code class="inline">create_rest_client()</code> 和 <code class="inline">get_checkpoint_archive_url_from_tinker_path(...)</code>，把 <code class="inline">tinker://.../sampler_weights/final</code> 下载成归档文件。</p>
+          <div class="callout">最准确的总结是：<strong>Hermes 的 agentic RL 不是自己手写 LoRA 注入和底层训练核，而是通过 Tinker 的 LoRA training client 来改 adapter 权重；再把更新后的 sampler client 用 FastAPI 封装成一个训练后模型 API。</strong></div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/trainer.py</code>、<code class="inline">/root/hermes/tinker-atropos/launch_training.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/config.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/utils/download_weights.py</code>、<code class="inline">/root/hermes/tools/rl_training_tool.py</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-workflow-linear">
+          <div class="section-header"><div class="index">HW1</div><h2>怎么思考设计 Hermes 的这个工作流：线性顺序说</h2></div>
+          <p>如果用“怎么设计”来想，Hermes 的工作流不是先想一个大而全的 agent，再往里塞功能；而是按<strong>线性运行链</strong>倒着设计：<strong>用户怎么进来 → 上下文怎么挂上 → 能调用什么 → 模型怎么循环决策 → 长任务怎么拆开 → 结果怎么落盘 → 经验怎么回流</strong>。</p>
+          <div class="callout"><strong>最顺的设计思路：</strong>先把一次 agent run 当成一条流水线，然后逐段问：这一段的输入是什么、状态放哪、失败了怎么恢复、结果给谁看。Hermes 基本就是沿这条顺序长出来的。</div>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先定入口。</strong>用户消息、CLI、gateway、cron、webhook 先统一成一个 agent run 请求，不让每个入口自己偷偷驱动一套逻辑。</div>
+            <div class="flow-step" data-step="2"><strong>再定会话归属。</strong>每个请求先挂到 session / user / platform / workspace 上，这样后面才知道该用哪份历史、哪套权限、哪个工作目录。</div>
+            <div class="flow-step" data-step="3"><strong>再定运行时能力。</strong>根据场景启用对应 toolsets、skills、memory、session search、terminal backend；也就是先决定“这个 agent 这次能干什么”。</div>
+            <div class="flow-step" data-step="4"><strong>再定 prompt 装配。</strong>把 system prompt、ephemeral system prompt、skills prompt、memory、session context、用户输入拼起来，形成这次决策的上下文。</div>
+            <div class="flow-step" data-step="5"><strong>再定核心 loop。</strong>模型先回答；如果出现 <code class="inline">tool_calls</code>，就执行工具，把 tool result 塞回消息，再进下一轮；直到产出最终文本。</div>
+            <div class="flow-step" data-step="6"><strong>再定复杂任务分流。</strong>如果任务太长、太并行、太容易阻塞，就交给 delegate/subagent/background task，而不是把所有复杂度都堆进单个同步 loop。</div>
+            <div class="flow-step" data-step="7"><strong>再定持久化。</strong>会话消息要写到 SQLite 和 session log，避免中断后什么都丢了；这也是后续 session_search、resume、回顾学习的基础。</div>
+            <div class="flow-step" data-step="8"><strong>最后定闭环学习。</strong>一次任务做完后，不只是返回答案，还会把经验回流到 memory、skills、自我回顾里，形成 Hermes 所说的 closed learning loop。</div>
+          </div>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>第 1 段：入口统一</h3>
+              <p>设计上第一件事不是模型，而是<strong>统一请求入口</strong>。Hermes 同时支持 CLI、消息平台、定时任务等，所以要先把这些入口压平成统一 run request；否则后面 session、日志、权限都没法统一。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 2 段：session 先于智能</h3>
+              <p>Hermes 很强调 session 持久化，因为 agent 的“连续性”不只是模型上下文窗口，而是会话归属、历史消息、标题、平台身份、workspace 状态共同决定的。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 3 段：工具和 skills 先挂好</h3>
+              <p>真正进入 loop 之前，先根据本次场景挂上可用工具和 skill。这样模型不是裸奔思考，而是在一个带工具、带 guardrails、带工作套路的运行时里决策。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 4 段：prompt 是装配层</h3>
+              <p>Hermes 的 prompt_builder 做的不是写一段漂亮 system prompt，而是把 memory、session、skills、平台约束、工具能力一起拼装成运行时上下文。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 5 段：核心 loop 要尽量简单</h3>
+              <p>核心循环最好保持朴素：<strong>构建消息 → 调模型 → 执行工具 → 回填结果 → 继续</strong>。Hermes 的复杂性主要放在 loop 外围的能力组织，而不是把 loop 本身写成一团巨型状态机。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 6 段：复杂度外溢到子代理</h3>
+              <p>当一个任务天然可并行、耗时长、或需要隔离上下文时，就交给 delegate_tool / subagent。这样主 loop 仍保持线性，但系统整体又能支持复杂编排。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 7 段：结果必须落盘</h3>
+              <p>Hermes 把 session 写入 SQLite 和 JSON log，不只是为了调试，而是因为没有持久化，就没有 resume、session_search、跨会话学习和审计。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第 8 段：把一次任务变成下次能力</h3>
+              <p>这是 Hermes 跟普通 agent 最大的设计差别之一：任务结束后还会思考要不要更新 skill、要不要写 memory、要不要形成下一次可复用的经验。</p>
+            </article>
+          </div>
+          <pre><code>input event
+  -> resolve session / platform / workspace
+  -> enable toolsets + skills + memory
+  -> build runtime prompt/context
+  -> model call
+  -> if tool_calls: run tools and loop
+  -> if task too complex: delegate / background task
+  -> final response
+  -> persist session/logs/state
+  -> memory / skill / review feedback loop</code></pre>
+          <div class="callout">所以线性顺序地说，Hermes 这套工作流的设计思想就是：<strong>先把运行时骨架搭稳，再让模型在这个骨架里循环决策，最后把每次任务沉淀成下次能力。</strong></div>
+          <div class="refs">参考：<code class="inline">/root/hermes/CONTRIBUTING.md</code>（Architecture Overview / Core Loop）、<code class="inline">/root/hermes/run_agent.py</code>、<code class="inline">/root/hermes/agent/prompt_builder.py</code>、<code class="inline">/root/hermes/tools/delegate_tool.py</code>、<code class="inline">/root/hermes/README.md</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-workflow-langgraph">
+          <div class="section-header"><div class="index">HW2</div><h2>如果用 LangGraph / LangChain 重新设计 Hermes 工作流编排</h2></div>
+          <p>如果用 <strong>LangGraph</strong> 来重做 Hermes，我不会先追求“一个超智能 agent”，而会先把 Hermes 现在已经有的运行时拆成<strong>图里的几个稳定节点</strong>，再用条件路由把它们串起来。最自然的思路是：<strong>session / context / model loop / tools / delegate / approval / persistence / learning review</strong> 分层建图。</p>
+          <div class="callout"><strong>核心原则：</strong>用 <code class="inline">StateGraph</code> 管 Hermes 的状态流；用 <code class="inline">ToolNode</code> 管工具执行；用 <code class="inline">Command</code> 或 <code class="inline">add_conditional_edges()</code> 做动态路由；用 <code class="inline">checkpointer</code> + <code class="inline">thread_id</code> 做 session 持久化；用 <code class="inline">interrupt()</code> 处理审批和人类介入。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先定义 graph state。</strong>用 <code class="inline">MessagesState</code> 或自定义 <code class="inline">TypedDict</code> / Pydantic state，至少放：messages、session metadata、enabled toolsets、skills、memory hits、todo/task state、delegate requests、review flags。</div>
+            <div class="flow-step" data-step="2"><strong>再搭主图骨架。</strong>用 <code class="inline">StateGraph(...)</code>，从 <code class="inline">START</code> 进入 ingress/session 节点，最后落到 <code class="inline">END</code>。</div>
+            <div class="flow-step" data-step="3"><strong>把 prompt 装配做成节点。</strong>不要把 prompt_builder 散在各处，而是单独一个 node：收集 memory、skills、session context，再产出给模型调用的 messages。</div>
+            <div class="flow-step" data-step="4"><strong>把模型思考和工具执行拆开。</strong>一个 llm node 只负责产出 assistant message / tool calls；一个 <code class="inline">ToolNode</code> 负责真正执行工具。</div>
+            <div class="flow-step" data-step="5"><strong>用动态路由驱动循环。</strong>如果模型输出 tool calls，就 route 到 tools；如果要 delegate，就 route 到 subgraph；如果无 tool calls，就 route 到 final response。</div>
+            <div class="flow-step" data-step="6"><strong>把复杂能力拆成 subgraphs。</strong>delegate、多 worker、后台任务、skill review 都不要塞进主 loop，而是做成 compiled subgraph 再挂回主图。</div>
+            <div class="flow-step" data-step="7"><strong>给高风险节点加 interrupt。</strong>文件写入、危险命令、外发消息、人工审批，统一通过 <code class="inline">interrupt()</code> 停住，等人类用 <code class="inline">Command(resume=...)</code> 恢复。</div>
+            <div class="flow-step" data-step="8"><strong>最后加 persistence 和 learning loop。</strong>编译时挂 <code class="inline">InMemorySaver</code> / <code class="inline">PostgresSaver</code>，执行时带 <code class="inline">thread_id</code>；任务结束后再进 skill/memory review 节点，把经验沉淀回系统。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 图的根骨架怎么搭</h3>
+              <pre><code>from langgraph.graph import StateGraph, START, END
+from langgraph.graph import MessagesState
+
+builder = StateGraph(MessagesState)
+builder.add_node("ingress", ingress_node)
+builder.add_node("assemble_context", assemble_context_node)
+builder.add_node("llm", llm_node)
+builder.add_node("tools", tool_node)
+builder.add_edge(START, "ingress")</code></pre>
+              <p>这里最像 Hermes 的，是先把“收到请求”“装配上下文”“模型决策”“工具执行”拆成显式节点，而不是把一切塞进一个大函数。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. Hermes 的 session 怎么映射</h3>
+              <p>Hermes 很强调 session，所以 LangGraph 版本里一定要把 session 放到 persistence 层，而不是只靠 messages 列表。直接做法是：</p>
+              <ul>
+                <li>编译图时加 <code class="inline">checkpointer=InMemorySaver()</code>（开发）或 <code class="inline">PostgresSaver</code>（生产）</li>
+                <li>每次调用图时传 <code class="inline">config={"configurable": {"thread_id": ...}}</code></li>
+              </ul>
+              <p>这样 Hermes 的 session resume / thread continuity 就可以直接映射到 LangGraph 的 thread/checkpoint 模型。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. prompt_builder 怎么落到 LangChain</h3>
+              <p>Hermes 现在有很重的 prompt 装配层。如果换 LangChain，我会把这层拆成：</p>
+              <ul>
+                <li><code class="inline">ChatPromptTemplate.from_messages(...)</code></li>
+                <li><code class="inline">MessagesPlaceholder</code> 放历史消息</li>
+                <li>一个 context assembly node 在调用模型前，把 memory / skills / platform constraints 组进 prompt variables</li>
+              </ul>
+              <p>也就是说，prompt 不是静态字符串，而是“LangChain prompt object + LangGraph context node”联合生成。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 工具循环怎么设计</h3>
+              <p>Hermes 的核心就是 tool loop。LangGraph 版最自然的写法是：</p>
+              <ul>
+                <li>工具定义用 <code class="inline">@tool</code></li>
+                <li>执行器用 <code class="inline">langgraph.prebuilt.ToolNode</code></li>
+                <li>llm node 产出 tool calls 后，通过 <code class="inline">add_conditional_edges()</code> 或 <code class="inline">Command(goto="tools")</code> 跳到 tools node</li>
+                <li>tools node 执行完成，再回到 llm node 继续循环</li>
+              </ul>
+              <pre><code>builder.add_conditional_edges(
+    "llm",
+    route_after_llm,
+    {"tools": "tools", "delegate": "delegate", "final": "finalize"}
+)</code></pre>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. delegate / subagent 怎么映射</h3>
+              <p>Hermes 的 delegate_tool 很重。如果用 LangGraph，我会把 delegate 做成单独 subgraph，而不是普通工具文本返回：</p>
+              <ul>
+                <li>父图用 <code class="inline">builder.add_node("delegate", compiled_subgraph)</code></li>
+                <li>subgraph 里再处理 child context、child tools、child result merge</li>
+                <li>如果需要 fan-out，可用 <code class="inline">Send</code> 从条件边批量派发多个并行任务</li>
+              </ul>
+              <p>这样比把 delegate 完全伪装成单个 tool call 更清晰，也更贴近 Hermes 的真实结构。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 审批和危险操作怎么做</h3>
+              <p>Hermes 现在有 approval 思路。LangGraph 版最标准的是在关键节点直接调用 <code class="inline">interrupt()</code>，把图暂停；等人类确认后，用 <code class="inline">Command(resume=...)</code> 恢复执行。</p>
+              <p>这很适合映射：</p>
+              <ul>
+                <li>危险 shell 命令</li>
+                <li>文件写入</li>
+                <li>外发消息</li>
+                <li>高风险自动操作</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. learning loop 怎么接回去</h3>
+              <p>Hermes 的特色不是只输出答案，而是会做 skill review / memory 回流。所以图跑到 final response 后，我会再挂一个 post-run review node：</p>
+              <ul>
+                <li>读本次 messages / tool traces</li>
+                <li>判断要不要更新 memory</li>
+                <li>判断要不要新建或修改 skill</li>
+                <li>把结果写入 store / filesystem</li>
+              </ul>
+              <p>如果想和 LangChain store 体系对齐，可以在 runtime context 里接持久化 store；短期记忆靠 checkpointer，长期记忆靠 store。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 为什么不用 create_agent 一把梭</h3>
+              <p>LangChain 的 <code class="inline">create_agent</code> 更适合快速起一个标准 agent；但 Hermes 这种“session 很重、tool loop 很重、delegate 很重、learning loop 很重”的系统，更适合直接用 LangGraph 原生 Graph API 自己搭。原因是：</p>
+              <ul>
+                <li>你能显式控制节点边界</li>
+                <li>你能显式控制状态结构</li>
+                <li>你能显式控制审批、持久化、并行、子图</li>
+                <li>你能让系统结构更接近 Hermes 真实运行时，而不是被通用 agent abstraction 压扁</li>
+              </ul>
+            </article>
+          </div>
+
+          <pre><code>LangGraph 版 Hermes（推荐骨架）
+START
+  -> ingress/session_resolve
+  -> assemble_context
+  -> llm
+      -> conditional route
+         -> tools (ToolNode) -> llm
+         -> delegate_subgraph -> llm
+         -> approval_interrupt -> resume -> llm
+         -> finalize
+  -> post_run_review
+      -> memory update
+      -> skill update
+  -> END</code></pre>
+
+          <div class="callout">如果一句话总结：<strong>用 LangGraph 重做 Hermes，关键不是“把 agent 跑起来”，而是把 Hermes 已有的 session、tool loop、delegate、approval、learning review 全都提升为图上的一等公民。</strong></div>
+          <div class="refs">设计参考：<a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph overview</a>、<a href="https://docs.langchain.com/oss/python/langgraph/graph-api">Graph API</a>、<a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain Tools / ToolNode</a>、<a href="https://docs.langchain.com/oss/python/langgraph/use-subgraphs">LangGraph Subgraphs</a>、<a href="https://docs.langchain.com/oss/python/langgraph/persistence">LangGraph Persistence</a>、<a href="https://docs.langchain.com/oss/python/langgraph/human-in-the-loop">LangGraph Interrupts</a>、<a href="https://docs.langchain.com/oss/python/langgraph/add-memory">LangGraph Memory</a></div>
+        </section>
+
+        <section class="section reveal" id="hermes-sandbox-overview">
+          <div class="section-header"><div class="index">HS1</div><h2>概览：Hermes Agent 里面是不是有沙箱</h2></div>
+          <p>有。Hermes 里的“沙箱”不是单一一种东西，而是分成几层：<strong>终端执行沙箱</strong>、<strong>代码执行沙箱</strong>、<strong>文件工具跨后端沙箱适配</strong>、以及<strong>浏览器运行时的 sandbox 处理</strong>。最重要的是前两类。</p>
+          <div class="callout"><strong>一句话：</strong>Hermes 的沙箱核心在 terminal backend。命令可以跑在 local，也可以跑在 Docker、Singularity、Modal、Daytona、Vercel Sandbox、SSH 这些隔离或远程环境里；execute_code 又在这个基础上再包一层 Python 脚本沙箱和工具 RPC。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先选 backend。</strong><code class="inline">terminal_tool.py</code> 支持 <code class="inline">local</code>、<code class="inline">docker</code>、<code class="inline">singularity</code>、<code class="inline">modal</code>、<code class="inline">daytona</code>、<code class="inline">vercel_sandbox</code>、<code class="inline">ssh</code>。</div>
+            <div class="flow-step" data-step="2"><strong>再创建执行环境。</strong>非 local 后端会创建容器、云沙箱或远端执行环境；Hermes 用 task_id / sandbox key 把一次任务和对应环境关联起来。</div>
+            <div class="flow-step" data-step="3"><strong>终端和文件工具走同一后端。</strong>file tools 不是只读本机文件，而是通过 terminal backend 的 execute 接口适配 Docker、Modal、Daytona 等环境。</div>
+            <div class="flow-step" data-step="4"><strong>execute_code 再包一层。</strong>它把用户 Python 代码放进临时 sandbox 目录，生成受限的 <code class="inline">hermes_tools.py</code>，只允许调用白名单工具，并过滤 secrets。</div>
+            <div class="flow-step" data-step="5"><strong>长期任务也按沙箱记录。</strong>process_registry 会区分 host PID 和 sandbox PID；非 local 后端会在沙箱内部启动、轮询、停止任务。</div>
+            <div class="flow-step" data-step="6"><strong>浏览器是另一类隔离。</strong>browser_tool 会在某些环境下注入 <code class="inline">--no-sandbox</code> 等 Chromium 参数，这是浏览器进程自己的 sandbox 兼容处理，不等同于 terminal sandbox。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 终端沙箱：Hermes 最核心的隔离层</h3>
+              <p><code class="inline">tools/terminal_tool.py</code> 明确把执行后端抽象成多种环境：local 是本机直跑；Docker / Singularity 是容器；Modal / Daytona / Vercel Sandbox 是云端沙箱；SSH 是远端机器。README 也把这些称为 terminal backends。</p>
+              <p>所以问“有没有沙箱”，答案是：<strong>有，但取决于你配置的 terminal backend</strong>。如果 backend 是 local，那命令就在本机跑；如果是 Docker / Modal / Daytona / Vercel，就进入隔离环境。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 配置层：不是默认全都隔离</h3>
+              <p><code class="inline">cli-config.yaml.example</code> 里有 terminal backend 配置示例。比如 Docker 后端可以显式设置 image、volume、是否把当前目录 mount 到 <code class="inline">/workspace</code>；这个 mount 选项默认关闭，因为它会把宿主工作目录暴露给容器。</p>
+              <div class="callout">这点很关键：Hermes 支持沙箱，但不是说所有操作天然都在安全容器里。安全边界来自 backend 选择和配置。</div>
+            </article>
+            <article class="mini-card">
+              <h3>3. execute_code：Python 子进程沙箱</h3>
+              <p><code class="inline">tools/code_execution_tool.py</code> 是另一层。它会创建临时目录，例如 <code class="inline">hermes_sandbox_*</code> 或远端 <code class="inline">hermes_exec_*</code>，把脚本和受限 RPC 工具模块放进去执行。</p>
+              <p>这个沙箱还会限制可调用工具集合，只暴露白名单里的工具，并且对环境变量和输出做 secret redaction，避免脚本直接读到 API key、token 等敏感信息。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 文件工具跟着后端走</h3>
+              <p><code class="inline">tools/file_operations.py</code> 的设计是跨 terminal backend 工作。也就是说，如果 terminal backend 是 Docker 或 Modal，文件读写/search/patch 等也应该作用在那个环境里，而不是误读宿主机路径。</p>
+              <p>这就是 Hermes 设计里的一个重要点：terminal、file、background process 尽量共享同一个执行环境语义。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. 后台任务也有沙箱意识</h3>
+              <p><code class="inline">tools/process_registry.py</code> 会记录进程是在 host 还是 sandbox 里。对 Docker、Modal、Daytona、SSH 这类非 local 后端，它会在沙箱内部启动命令、记录沙箱内 PID，并通过后续 execute 调用轮询日志或停止进程。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. RL / benchmark 里也会用隔离沙箱</h3>
+              <p><code class="inline">environments/hermes_base_env.py</code> 和 terminal test env 里能看到，RL rollout 或 benchmark 会给每个任务配置 terminal backend，例如 Modal 云沙箱。这样不同 rollout 不共享同一个本机执行环境。</p>
+            </article>
+          </div>
+
+          <pre><code>Hermes sandbox layers
+  terminal backend
+    -> local / docker / singularity / modal / daytona / vercel_sandbox / ssh
+  file operations
+    -> execute through the active terminal backend
+  execute_code
+    -> temporary script sandbox
+    -> restricted hermes_tools.py RPC
+    -> secret stripping / output redaction
+  background tasks
+    -> host PID or sandbox PID tracking
+  browser runtime
+    -> Chromium sandbox compatibility flags when needed</code></pre>
+
+          <div class="callout">最短答案：<strong>Hermes 有沙箱能力，但它是后端驱动的。真正隔离强弱取决于 terminal backend；execute_code 在此基础上再做一层 Python 执行沙箱。</strong></div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tools/terminal_tool.py</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py</code>、<code class="inline">/root/hermes/tools/file_operations.py</code>、<code class="inline">/root/hermes/tools/process_registry.py</code>、<code class="inline">/root/hermes/cli-config.yaml.example</code>、<code class="inline">/root/hermes/README.md</code></div>
+        </section>
+
         <section class="section reveal" id="claude-workflow-1">
           <div class="section-header"><div class="index">C1</div><h2>claude code工作流编排：总体入口</h2></div>
           <p>服务器上的 Claude Code 源码 zip 已解压到 <code class="inline">/root/OpenClaw/src/claude_code_source/claude-code-source-code-main</code>。这份源码来自 <code class="inline">@anthropic-ai/claude-code</code> v2.1.88 的反编译/拆包研究仓库，项目自身 README 也说明它不是完整内部源码，部分 feature-gated 模块在公开 npm 包里被裁剪。</p>
@@ -2108,6 +2614,146 @@ GRPO/RLHF optimized model</code></pre>
   -> independent verification worker proves behavior
   -> Coordinator reports final state to user</code></pre>
           <div class="refs">参考：<code class="inline">src/claude_code_source/claude-code-source-code-main/src/QueryEngine.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/query.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/tools.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/services/tools/*.ts</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/tools/AgentTool/*.ts*</code>、<code class="inline">src/claude_code_source/claude-code-source-code-main/src/coordinator/coordinatorMode.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-7">
+          <div class="section-header"><div class="index">C7</div><h2>怎么用 LangGraph 实现类似 Claude Code 的工作流编排</h2></div>
+          <p>如果用 LangGraph 复刻 Claude Code 的工作流，不要把它设计成“一个大 agent prompt”。更稳的设计是把 Claude Code 里的隐式循环显式拆成一张有状态图：<strong>主会话状态、模型决策节点、工具执行节点、权限/hook 节点、子代理调度节点、压缩/恢复节点、最终汇总节点</strong>。</p>
+          <div class="callout"><strong>核心映射：</strong>Claude Code 的 <code class="inline">QueryEngine + query loop + tool orchestration + AgentTool + coordinator</code>，在 LangGraph 里可以映射成 <code class="inline">StateGraph</code>、conditional edges、tool executor node、checkpoint、interrupt/human approval、Send/Command 式并行分支和 supervisor/worker 子图。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. State 是 QueryEngine</h3>
+              <p>用一个 TypedDict/Pydantic state 保存 messages、cwd、工具权限、任务列表、worker 状态、transcript、token/预算、是否需要 compact、最后一次 tool_calls、错误和中断信号。LangGraph 的 checkpoint 用来替代 Claude Code transcript/resume 的一部分能力。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. LLM node 是 query() 的模型调用</h3>
+              <p><code class="inline">call_model</code> 节点读取 state.messages 和 system context，调用带工具绑定的模型。如果返回 tool_calls，就走工具分支；如果没有 tool_calls，就进入 stop-hook/verification/final 分支。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Tool node 是 toolOrchestration</h3>
+              <p><code class="inline">execute_tools</code> 节点负责 schema 校验、权限判断、hook、真正执行工具、把 tool_result 追加回 messages。读类工具可以并行，写类工具按资源锁串行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Supervisor 是 coordinator</h3>
+              <p>复杂任务不要让一个 agent 顺序做完，而是让 supervisor 节点先拆任务，给 research / implementation / verification worker 子图发任务，再综合结果决定继续、重试、停止还是汇报。</p>
+            </article>
+          </div>
+
+          <p>一张比较接近 Claude Code 的 LangGraph 图可以这样设计：</p>
+          <pre><code>START
+  -> ingest_user_input
+  -> load_context_and_memory
+  -> maybe_compact
+  -> supervisor_or_call_model
+      -> if normal single-agent turn: call_model
+      -> if complex task: plan_and_dispatch_workers
+
+call_model
+  -> if tool_calls: permission_and_hooks
+  -> if final_answer: stop_hooks_or_finish
+
+permission_and_hooks
+  -> execute_tools
+  -> append_tool_results
+  -> maybe_compact
+  -> call_model
+
+plan_and_dispatch_workers
+  -> research_worker(s) in parallel
+  -> synthesize_findings
+  -> implementation_worker
+  -> verification_worker
+  -> final_report</code></pre>
+
+          <p>设计时最关键的是把“节点职责”切干净：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>ingest_user_input：</strong>解析用户输入、slash command、文件附件、环境信息，写入 state.messages。</div>
+            <div class="flow-step" data-step="2"><strong>load_context_and_memory：</strong>加载项目说明、rules、memory、git status、MCP/tool registry，形成 system/user context。</div>
+            <div class="flow-step" data-step="3"><strong>maybe_compact：</strong>检查 token 预算；如果超限，调用 summary/compact 节点，把旧消息压缩成 compact boundary。</div>
+            <div class="flow-step" data-step="4"><strong>call_model：</strong>让模型决定下一步：回答、调用工具、请求子代理、进入 plan mode、或要求用户确认。</div>
+            <div class="flow-step" data-step="5"><strong>permission_and_hooks：</strong>对 tool call 做 schema 校验、policy 判断、pre-hook、人类审批 interrupt、输入改写。</div>
+            <div class="flow-step" data-step="6"><strong>execute_tools：</strong>按工具并发安全性执行；读操作可 fan-out，写操作按文件路径加锁。</div>
+            <div class="flow-step" data-step="7"><strong>worker_subgraph：</strong>每个 worker 是一个独立子图，有自己的 messages、tools、cwd、权限和 checkpoint。</div>
+            <div class="flow-step" data-step="8"><strong>synthesize/final：</strong>supervisor 综合 worker 输出，生成下一轮 worker prompt 或最终给用户的报告。</div>
+          </div>
+
+          <p>伪代码可以长这样：</p>
+          <pre><code>from typing import TypedDict, Annotated
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.types import Command, Send, interrupt
+
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    cwd: str
+    permission_mode: str
+    tool_calls: list
+    worker_results: list
+    todos: list
+    compact_needed: bool
+    final: str | None
+
+async def call_model(state: AgentState):
+    response = await model_with_tools.ainvoke(state["messages"])
+    return {"messages": [response], "tool_calls": response.tool_calls}
+
+def route_after_model(state: AgentState):
+    if state.get("tool_calls"):
+        return "permission_and_hooks"
+    return "stop_hooks_or_finish"
+
+async def permission_and_hooks(state: AgentState):
+    for call in state["tool_calls"]:
+        if is_risky(call):
+            decision = interrupt({"kind": "permission", "tool_call": call})
+            if decision["action"] != "allow":
+                return {"messages": [make_denial_result(call)]}
+    return {}
+
+async def execute_tools(state: AgentState):
+    results = await run_read_tools_parallel_write_tools_serial(state["tool_calls"])
+    return {"messages": results, "tool_calls": []}
+
+def dispatch_workers(state: AgentState):
+    tasks = decompose_task(state["messages"])
+    return [Send("worker_subgraph", {"messages": [task.prompt], "cwd": state["cwd"]}) for task in tasks]
+
+graph = StateGraph(AgentState)
+graph.add_node("call_model", call_model)
+graph.add_node("permission_and_hooks", permission_and_hooks)
+graph.add_node("execute_tools", execute_tools)
+graph.add_node("worker_subgraph", worker_graph)
+graph.add_node("synthesize", synthesize_worker_results)
+
+graph.add_edge(START, "call_model")
+graph.add_conditional_edges("call_model", route_after_model)
+graph.add_edge("permission_and_hooks", "execute_tools")
+graph.add_edge("execute_tools", "call_model")
+graph.add_edge("synthesize", END)
+app = graph.compile(checkpointer=checkpointer)</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>权限怎么做</h3>
+              <p>Claude Code 的权限系统在工具执行前。LangGraph 里应单独建 <code class="inline">permission_and_hooks</code> 节点：先走 policy/allowlist，再用 <code class="inline">interrupt()</code> 做 human-in-the-loop 审批，批准后把可能被用户修改的 input 写回 state。</p>
+            </article>
+            <article class="mini-card">
+              <h3>并发怎么做</h3>
+              <p>Claude Code 会并发跑 concurrency-safe 工具。LangGraph 里可以把只读工具拆成多个 <code class="inline">Send</code> 分支，或者在一个 executor 节点内部用 asyncio 并发；写工具则按 file_path / resource key 加锁串行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>子代理怎么做</h3>
+              <p>每个 worker 用一个子图：自己的 state、system prompt、tool pool、checkpoint namespace。Supervisor 只拿 worker summary，不把所有原始工具输出塞回主上下文，避免污染主 agent。</p>
+            </article>
+            <article class="mini-card">
+              <h3>恢复怎么做</h3>
+              <p>用 checkpointer 保存每个 turn 的 state；长任务、worker、人工审批都可以恢复。对于工具副作用，要额外记录 tool_call_id、幂等键、文件快照或 patch，避免 resume 后重复执行危险写操作。</p>
+            </article>
+          </div>
+
+          <div class="callout">设计原则：LangGraph 负责“可控状态机”，LLM 只负责“决策下一步”。把权限、并发、子代理、压缩、恢复都放进显式节点，不要藏在 prompt 里；这样才接近 Claude Code 那种可恢复、可审计、可并行、可人工接管的工作流编排。</div>
+          <div class="refs">参考：LangGraph 官方文档的 <code class="inline">StateGraph</code>、checkpoint/persistence、human-in-the-loop interrupt、Command/Send、多代理 supervisor/swarm 设计；对照本地 Claude Code 源码 <code class="inline">src/query.ts</code>、<code class="inline">src/services/tools/toolOrchestration.ts</code>、<code class="inline">src/tools/AgentTool/runAgent.ts</code>、<code class="inline">src/coordinator/coordinatorMode.ts</code>。</div>
         </section>
       </main>
     </div>
@@ -2211,6 +2857,22 @@ GRPO/RLHF optimized model</code></pre>
     }, { rootMargin: '-18% 0px -58% 0px', threshold: [0.15, 0.3, 0.6] });
 
     sections.forEach(section => sectionObserver.observe(section));
+
+    function revealHashTarget() {
+      if (!window.location.hash) return;
+      const target = document.getElementById(window.location.hash.slice(1));
+      if (!target) return;
+      target.classList.add('visible');
+      const tocLink = document.querySelector(`.toc a[href="${window.location.hash}"]`);
+      const group = tocLink?.closest('details');
+      if (group) group.open = true;
+      requestAnimationFrame(() => {
+        target.scrollIntoView({ block: 'start' });
+      });
+    }
+
+    revealHashTarget();
+    window.addEventListener('hashchange', revealHashTarget);
 
     menuToggle?.addEventListener('click', () => {
       if (isMobileLayout()) {
