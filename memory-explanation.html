@@ -973,7 +973,7 @@
         <details class="toc-group" id="hermesSandboxTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent 沙箱</span>
-            <span class="toc-count">6 sections</span>
+            <span class="toc-count">7 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-sandbox-overview">01 · 概览</a>
@@ -982,6 +982,7 @@
             <a href="#hermes-sandbox-isolation-basics">04 · 沙箱到底怎么隔离：Terminal Backend 和 Docker bind mount 是什么</a>
             <a href="#hermes-docker-sandbox-threats">05 · Docker 沙箱到底防住了哪些危险，哪些防不住</a>
             <a href="#hermes-sandbox-context-engineering">06 · 沙箱能不能做上下文工程：工具过程不进上下文，只返回结果</a>
+            <a href="#hermes-sandbox-options-selection">07 · Hermes 支持哪些沙箱方案：技术选型优劣对比</a>
           </div>
         </details>
       </nav>
@@ -3059,6 +3060,124 @@ important:
 
           <div class="callout"><strong>最终结论：</strong>你记得没错。沙箱可以用于上下文工程，但这里的“沙箱”更多指一个受控的工具执行空间：让冗长工具过程在里面发生，只把压缩后的结果交给主模型。Docker 解决安全边界，<code class="inline">execute_code</code> / worker 解决上下文边界。</div>
           <div class="refs">参考：<code class="inline">/root/hermes/tools/code_execution_tool.py:1708-1739</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:1375-1381</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:2044-2078</code>、<code class="inline">/root/hermes/tools/tool_output_limits.py</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-sandbox-options-selection">
+          <div class="section-header"><div class="index">HS7</div><h2>Hermes 支持哪些沙箱方案：技术选型优劣对比</h2></div>
+          <p>Hermes 的“沙箱方案”分两层：第一层是 <strong>Terminal Backend</strong>，决定命令在哪里跑；第二层是 <strong>工具执行沙箱</strong>，比如 <code class="inline">execute_code</code>，决定多步工具过程怎么被压缩、限制和返回。做技术选型时，不要只问“哪个最安全”，要问：任务是本地开发、云端长期任务、HPC、RL rollout、还是上下文压缩。</p>
+          <div class="callout"><strong>一句话选型：</strong>本地快速任务用 local；真实项目开发优先 Docker；HPC 用 Singularity/Apptainer；远端机器/GPU 用 SSH；云端持久 agent 用 Modal / Daytona；前端/Node 云运行可看 Vercel Sandbox；上下文工程用 <code class="inline">execute_code</code>。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. local：最快，但不是隔离沙箱</h3>
+              <p><strong>是什么：</strong>命令直接在宿主机执行，cwd 就是本机目录。</p>
+              <p><strong>优点：</strong>最快、最简单、没有容器启动成本；最适合读文件、轻量脚本、你完全信任的项目。</p>
+              <p><strong>缺点：</strong>隔离最弱。agent 装依赖、删文件、启动进程都会影响宿主机。</p>
+              <p><strong>适合：</strong>个人临时任务、小脚本、低风险 repo、只读分析。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. Docker：默认推荐的工程沙箱</h3>
+              <p><strong>是什么：</strong>Hermes 创建 Docker 容器，在容器里跑 shell；可选择是否把当前项目 bind mount 到 <code class="inline">/workspace</code>。</p>
+              <p><strong>优点：</strong>依赖隔离好、可用镜像复现环境、支持 CPU/内存/磁盘限制，适合跑测试、构建、安装依赖。</p>
+              <p><strong>缺点：</strong>需要 Docker；bind mount 后项目目录是真实暴露的；Docker Desktop / Linux 权限细节可能影响文件 owner。</p>
+              <p><strong>适合：</strong>代码修改、SWE 任务、真实项目测试、避免污染宿主环境。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. Singularity / Apptainer：HPC 场景更合适</h3>
+              <p><strong>是什么：</strong>面向 HPC/科研集群常见的容器运行方案，Hermes 可通过 <code class="inline">singularity_image</code> 使用 Docker 格式镜像源。</p>
+              <p><strong>优点：</strong>更适合共享集群、GPU/HPC 管理环境；很多机构不允许 Docker daemon，但允许 Apptainer/Singularity。</p>
+              <p><strong>缺点：</strong>本地开发生态不如 Docker 普遍；镜像、挂载、权限模型和 Docker 不完全一样。</p>
+              <p><strong>适合：</strong>科研集群、GPU 队列、企业/学校 HPC 环境。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. SSH：把执行放到远端机器</h3>
+              <p><strong>是什么：</strong>Hermes agent 逻辑还在本地/服务端，但命令通过 SSH 在远端服务器执行。</p>
+              <p><strong>优点：</strong>可用远端 GPU、大内存、内网资源；不需要把 agent 整个部署过去；适合已有服务器。</p>
+              <p><strong>缺点：</strong>它不是容器隔离，隔离强弱取决于远端账号权限；网络延迟和 SSH 可靠性会影响体验。</p>
+              <p><strong>适合：</strong>远端开发机、GPU server、公司内网构建环境、VPS 长任务。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. Modal：云沙箱 / serverless 执行</h3>
+              <p><strong>是什么：</strong>命令跑在 Modal 云沙箱里。Hermes 支持 direct Modal，也有 managed Modal gateway 的选择逻辑。</p>
+              <p><strong>优点：</strong>云端运行、可持久化文件系统、空闲可休眠；适合无需用户电脑常开的 agent。</p>
+              <p><strong>缺点：</strong>依赖 Modal 凭据或 managed gateway；文件同步/项目来源要设计好；成本和冷启动需要考虑。</p>
+              <p><strong>适合：</strong>云端长期 agent、批量任务、RL rollout、需要弹性资源的执行。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. Daytona：云 workspace 型沙箱</h3>
+              <p><strong>是什么：</strong>命令在 Daytona cloud sandbox / workspace 里执行，需要 Daytona SDK 和 API key。</p>
+              <p><strong>优点：</strong>更像远端开发 workspace；适合保存项目状态、长期任务、跨会话继续。</p>
+              <p><strong>缺点：</strong>依赖外部服务；磁盘/资源有平台限制；项目同步、凭据管理要额外规划。</p>
+              <p><strong>适合：</strong>远程 coding workspace、长期工程任务、agent 不依赖本地电脑的场景。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. Vercel Sandbox：偏 Web / Node 云运行</h3>
+              <p><strong>是什么：</strong>Hermes 支持 <code class="inline">vercel_sandbox</code> backend，在 Vercel Sandbox 云环境里执行命令。</p>
+              <p><strong>优点：</strong>适合 Web/Node 生态、前端预览、serverless 风格任务；和 Vercel 平台集成思路接近。</p>
+              <p><strong>缺点：</strong>需要对应 runtime / SDK / 平台配置；不一定适合复杂系统级构建或任意 Linux 工作负载。</p>
+              <p><strong>适合：</strong>前端项目、Node/Web demo、预览型工作流。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. execute_code：不是机器隔离，主要是上下文隔离</h3>
+              <p><strong>是什么：</strong>Hermes 生成受控 <code class="inline">hermes_tools.py</code>，让 Python 脚本在受限工具集合里做多步调用、过滤、聚合、摘要。</p>
+              <p><strong>优点：</strong>减少主模型上下文污染；可把 20 次工具调用压缩成一个结构化结果；有 timeout、stdout cap、工具调用次数限制和 secret redaction。</p>
+              <p><strong>缺点：</strong>它不是替代 Docker 的安全边界；脚本执行在哪里，仍取决于当前 terminal backend 和 execution mode。</p>
+              <p><strong>适合：</strong>上下文工程、批处理工具调用、日志压缩、批量文件分析。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>只想最快完成低风险任务：</strong>选 local。</div>
+            <div class="flow-step" data-step="2"><strong>要改真实代码且不想污染电脑：</strong>选 Docker，必要时 bind mount 项目到 <code class="inline">/workspace</code>。</div>
+            <div class="flow-step" data-step="3"><strong>在学校/公司 HPC 或 GPU 集群：</strong>优先 Singularity / Apptainer，或者 SSH 到集群登录节点/开发节点。</div>
+            <div class="flow-step" data-step="4"><strong>有现成远端机器：</strong>选 SSH；但要把远端账号权限当作安全边界。</div>
+            <div class="flow-step" data-step="5"><strong>想让 agent 云端长期运行：</strong>选 Modal / Daytona，重点设计项目同步、凭据、成本和持久化。</div>
+            <div class="flow-step" data-step="6"><strong>工具输出太长：</strong>不要只换 Docker；用 <code class="inline">execute_code</code> / worker 做上下文压缩。</div>
+          </div>
+
+          <pre><code>Hermes sandbox selection matrix
+
+local
+  best for: fast trusted tasks
+  risk: affects host directly
+
+docker
+  best for: real coding + tests + dependency isolation
+  risk: mounted project is real
+
+singularity / apptainer
+  best for: HPC / research clusters
+  risk: more cluster-specific behavior
+
+ssh
+  best for: remote GPU / VPS / internal servers
+  risk: remote account permissions define blast radius
+
+modal
+  best for: cloud sandbox, elastic jobs, RL rollouts
+  risk: service credentials, sync, cost, cold start
+
+daytona
+  best for: persistent remote workspace
+  risk: external service dependency, resource limits
+
+vercel_sandbox
+  best for: Web / Node / preview-style tasks
+  risk: platform/runtime constraints
+
+execute_code
+  best for: context engineering and multi-tool compression
+  risk: not a replacement for OS/container isolation</code></pre>
+
+          <div class="callout"><strong>推荐默认策略：</strong>个人 coding agent 先用 Docker；大规模/云端 agent 用 Modal 或 Daytona；HPC 用 Singularity；上下文污染问题用 <code class="inline">execute_code</code>。不要把所有问题都叫“沙箱问题”：安全隔离、运行位置、持久化、成本、上下文压缩是不同维度。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tools/terminal_tool.py:1-25</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:1107-1246</code>、<code class="inline">/root/hermes/cli-config.yaml.example:160-248</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:1708-1739</code>、<code class="inline">/root/hermes/README.md:25</code></div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
