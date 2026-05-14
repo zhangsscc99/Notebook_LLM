@@ -948,10 +948,11 @@
         <details class="toc-group" id="hermesSandboxTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent 沙箱</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-sandbox-overview">01 · 概览</a>
+            <a href="#hermes-sandbox-editfile-flow">02 · 沙箱原理：edit_file / 多文件项目到底怎么改</a>
           </div>
         </details>
       </nav>
@@ -2524,6 +2525,101 @@ START
 
           <div class="callout">最短答案：<strong>Hermes 有沙箱能力，但它是后端驱动的。真正隔离强弱取决于 terminal backend；execute_code 在此基础上再做一层 Python 执行沙箱。</strong></div>
           <div class="refs">参考：<code class="inline">/root/hermes/tools/terminal_tool.py</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py</code>、<code class="inline">/root/hermes/tools/file_operations.py</code>、<code class="inline">/root/hermes/tools/process_registry.py</code>、<code class="inline">/root/hermes/cli-config.yaml.example</code>、<code class="inline">/root/hermes/README.md</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-sandbox-editfile-flow">
+          <div class="section-header"><div class="index">HS2</div><h2>沙箱原理：edit_file / 多文件项目到底怎么改</h2></div>
+          <p>理解 Hermes 沙箱时，最容易误解的一点是：<strong>它不是永远把整个项目复制进沙箱，改完再整体拷回来</strong>。更准确地说，Hermes 有一个统一的 file / terminal 抽象，真正文件在哪里被改，取决于当前 <code class="inline">terminal backend</code>。</p>
+          <div class="callout"><strong>最短答案：</strong>本地 backend 是直接改宿主项目；Docker/Singularity 如果 bind mount 了项目，就是在容器里改挂载目录，实际立刻落到宿主文件；Modal/Daytona 这类云沙箱默认主要同步 <code class="inline">~/.hermes</code> 状态，不会自动把任意大项目整包同步来回，除非你在沙箱里 clone / 上传 / 挂载 / 自己做同步。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先确定当前 backend。</strong>Hermes 看配置里的 <code class="inline">terminal.backend</code>，决定文件工具和终端命令运行在哪里。</div>
+            <div class="flow-step" data-step="2"><strong>file tools 不自己发明一套文件系统。</strong><code class="inline">read_file</code>、<code class="inline">write_file</code>、<code class="inline">patch</code>、search 会通过当前 backend 的执行环境理解路径。</div>
+            <div class="flow-step" data-step="3"><strong>local 模式。</strong>路径就是宿主机路径，改 <code class="inline">/root/project/a.py</code> 就是直接改这台机器上的文件。</div>
+            <div class="flow-step" data-step="4"><strong>Docker bind mount 模式。</strong>如果 <code class="inline">docker_mount_cwd_to_workspace: true</code>，宿主项目被挂到容器 <code class="inline">/workspace</code>；容器内改 <code class="inline">/workspace/a.py</code>，宿主项目马上变化，不需要 copy back。</div>
+            <div class="flow-step" data-step="5"><strong>云沙箱模式。</strong>Modal / Daytona 会创建远端沙箱；代码在沙箱内执行。默认同步的是 Hermes 自己的运行状态目录，不等于自动同步整个用户项目。</div>
+            <div class="flow-step" data-step="6"><strong>execute_code 模式。</strong>Python 代码先被放进临时 sandbox 目录运行；如果它要改项目文件，通常还是通过 Hermes 暴露的文件工具 RPC 去改当前 backend 里的项目。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>案例 1：local 后端改很多文件</h3>
+              <p>假设项目在 <code class="inline">/root/myapp</code>，Hermes 当前 terminal backend 是 <code class="inline">local</code>，cwd 也是这个项目。</p>
+              <pre><code>terminal.backend = local
+cwd = /root/myapp
+
+patch src/a.py
+write_file src/b.py
+search src/
+run pytest</code></pre>
+              <p>这时没有“复制到沙箱”这一步。Hermes 的 file tool 直接改宿主机上的 <code class="inline">/root/myapp/src/a.py</code>、<code class="inline">/root/myapp/src/b.py</code>。跑测试也是在宿主机项目里跑。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>案例 2：Docker 后端改宿主项目</h3>
+              <p>如果你启用 Docker，并显式打开：</p>
+              <pre><code>terminal:
+  backend: "docker"
+  cwd: "/workspace"
+  docker_mount_cwd_to_workspace: true</code></pre>
+              <p>Hermes 会让容器看到宿主启动目录的内容。此时 agent 在容器里看到的是 <code class="inline">/workspace</code>，但这个目录背后是宿主项目的 bind mount。</p>
+              <div class="callout">所以 Docker 这种情况下不是“先复制，再拷回”；更像是“容器拿着宿主项目目录的一个挂载视图在改”。</div>
+            </article>
+
+            <article class="mini-card">
+              <h3>案例 3：Docker 不挂载项目</h3>
+              <p>如果 <code class="inline">docker_mount_cwd_to_workspace</code> 是 false，容器默认看不到宿主当前项目。你在容器里改的文件只是容器文件系统里的文件。</p>
+              <p>这种模式隔离更强，但也意味着：如果你想让改动回到宿主项目，需要额外的同步、复制、git push，或者一开始就把项目 clone 到容器里并从容器提交。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>案例 4：Modal / Daytona 云沙箱</h3>
+              <p>Modal / Daytona 的 backend 会创建远端沙箱，并在执行前后通过 <code class="inline">FileSyncManager</code> 同步文件。但从代码看，默认同步重点是 <code class="inline">~/.hermes</code> 这类 Hermes 状态目录，不是任意项目源码树。</p>
+              <p>所以如果你说“一个具体项目，要改很多文件”，云沙箱里通常有三种做法：在沙箱里 <code class="inline">git clone</code> 项目后改并 push；显式上传需要的项目文件；或者配置持久沙箱 / 快照让项目留在沙箱里。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>案例 5：execute_code 不是项目复制器</h3>
+              <p><code class="inline">execute_code</code> 会创建临时目录，把用户 Python 脚本和受限 <code class="inline">hermes_tools.py</code> 放进去运行。这层主要是为了限制 Python 脚本能调用什么工具、能看到什么环境变量。</p>
+              <p>如果脚本里调用文件工具去改项目，最终还是回到“当前 terminal backend 的项目在哪里”这个问题。它本身不是把整个项目复制进去改完再还原的机制。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>怎么判断自己属于哪一种</h3>
+              <p>看三件事就够了：</p>
+              <ul>
+                <li><code class="inline">terminal.backend</code> 是 local、docker、modal、daytona 还是 ssh。</li>
+                <li>当前 cwd 是宿主路径、容器路径，还是远端路径。</li>
+                <li>有没有 mount / clone / sync 配置把项目放进那个环境。</li>
+              </ul>
+              <p>这三件事决定 editfile 是直接改宿主、通过挂载改宿主，还是只改沙箱内部文件。</p>
+            </article>
+          </div>
+
+          <pre><code>edit_file / patch mental model
+
+local backend
+  -> edit host project directly
+
+docker with cwd bind mount
+  -> edit /workspace in container
+  -> host project changes immediately through mount
+
+docker without mount
+  -> edit container filesystem only
+  -> need explicit copy / git push / sync to get changes out
+
+modal / daytona
+  -> edit remote sandbox filesystem
+  -> default sync is mainly Hermes state
+  -> project source must be cloned, mounted, uploaded, or otherwise synced
+
+execute_code
+  -> run script in temp sandbox
+  -> file changes happen through allowed Hermes tools and active backend</code></pre>
+
+          <div class="callout">所以你问“是不是把项目直接复制到沙箱里去改，再把文件拷回来”：<strong>不一定，而且通常不是这么简单粗暴。Hermes 的核心是统一 backend 抽象；项目文件是否复制、挂载、同步，要看 backend 和配置。</strong></div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tools/environments/base.py:765-767</code>、<code class="inline">/root/hermes/tools/environments/modal.py</code>、<code class="inline">/root/hermes/tools/environments/daytona.py</code>、<code class="inline">/root/hermes/tools/file_operations.py</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py</code>、<code class="inline">/root/hermes/cli-config.yaml.example:160-198</code></div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
