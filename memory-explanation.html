@@ -909,13 +909,14 @@
         <details class="toc-group" id="joyAgentTocGroup" open>
           <summary>
             <span class="toc-group-title">京东Joy Agent</span>
-            <span class="toc-count">4 sections</span>
+            <span class="toc-count">5 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#joyagent-overview">01 · 概览介绍京东 JoyAgent-JDGenie</a>
             <a href="#joyagent-workflow-langgraph">02 · JoyAgent 工作流编排怎么做，用了什么 Agent 框架；如果用 LangGraph 怎么设计</a>
             <a href="#joyagent-workflow-architecture-image">03 · 用一张架构图解释 JoyAgent 工作流编排</a>
             <a href="#joyagent-workflow-explainable-model">04 · JoyAgent 工作流编排怎么讲才容易记住：设计类似系统的思路</a>
+            <a href="#joyagent-react-plansolve-source">05 · 源码里 ReAct 和 Plan-Solve 到底怎么实现的</a>
           </div>
         </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
@@ -2503,6 +2504,179 @@ Frontend does not wait blindly:
 
           <div class="callout"><strong>记忆口诀：</strong>一张工单，一个派单员，两种模式，三个角色，一组工具，一个流式交付。工单是 AgentContext；派单员是 HandlerFactory；两种模式是 ReAct / Plan-Solve；三个角色是 Planner / Executor / Summary；工具是 ToolCollection；交付是 SSE。</div>
           <div class="refs">参考：<code class="inline">AgentContext.java</code>、<code class="inline">AgentHandlerFactory.java</code>、<code class="inline">PlanSolveHandlerImpl.java</code>、<code class="inline">ReactHandlerImpl.java</code>、<code class="inline">BaseAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">SummaryAgent.java</code>、<code class="inline">ToolCollection.java</code>、<code class="inline">SSEPrinter.java</code></div>
+        </section>
+
+        <section class="section reveal" id="joyagent-react-plansolve-source">
+          <div class="section-header"><div class="index">J5</div><h2>源码里 ReAct 和 Plan-Solve 到底怎么实现的</h2></div>
+          <p>JoyAgent 里 ReAct 和 Plan-Solve 不是两个外部框架，而是同一套自研 Java agent runtime 上的两种 handler。共同底座是 <code class="inline">BaseAgent.run()</code> 的循环、<code class="inline">ReActAgent.step()</code> 的 <code class="inline">think()</code> / <code class="inline">act()</code> 模板、<code class="inline">LLM.askTool()</code> 的 function calling、以及 <code class="inline">ToolCollection.execute()</code> 的工具执行。</p>
+          <div class="callout"><strong>一句话：</strong>ReAct = 一个执行器自己循环“想 → 调工具 → 看结果 → 再想”；Plan-Solve = 先用 PlanningAgent 拆计划，再用 ExecutorAgent 执行任务，执行结果再反馈给 PlanningAgent，直到 planner 返回 finish。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 共同底座：BaseAgent.run()</h3>
+              <p>所有 agent 都继承 <code class="inline">BaseAgent</code>。它维护 name、systemPrompt、nextStepPrompt、availableTools、memory、llm、context、state、maxSteps、currentStep。</p>
+              <p>核心循环在 <code class="inline">run(query)</code>：先把 query 作为 USER message 写入 memory，然后 while 循环调用 <code class="inline">step()</code>，直到达到 maxSteps 或 state 变成 FINISHED。</p>
+              <pre><code>BaseAgent.run(query)
+  -> updateMemory(USER, query)
+  -> while currentStep &lt; maxSteps and state != FINISHED:
+       currentStep++
+       step()
+  -> return last step result</code></pre>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. ReActAgent：固定 think / act 模板</h3>
+              <p><code class="inline">ReActAgent</code> 是抽象类，只规定两件事：</p>
+              <ul>
+                <li><code class="inline">think()</code>：让模型思考下一步，通常产生 tool calls。</li>
+                <li><code class="inline">act()</code>：执行这些 tool calls，并把结果写回 memory。</li>
+              </ul>
+              <p>它的 <code class="inline">step()</code> 很短：先 <code class="inline">think()</code>，如果应该行动就 <code class="inline">act()</code>。所以 JoyAgent 的 ReAct 不是玄学，就是一个模板方法。</p>
+              <pre><code>ReActAgent.step()
+  -> shouldAct = think()
+  -> if !shouldAct: return
+  -> return act()</code></pre>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. ReactImplAgent.think() 怎么做</h3>
+              <p><code class="inline">ReactImplAgent</code> 构造时读取配置里的 react system prompt、next step prompt、react model name，并把 <code class="inline">context.getToolCollection()</code> 设为 availableTools。</p>
+              <p><code class="inline">think()</code> 会把当前 productFiles 格式化进 prompt，然后调用：</p>
+              <pre><code>llm.askTool(
+  context,
+  memory.messages,
+  systemMessage(systemPrompt),
+  availableTools,
+  ToolChoice.AUTO,
+  ...
+)</code></pre>
+              <p><code class="inline">askTool</code> 会把 ToolCollection 里的工具转成 OpenAI/Claude function calling schema，模型返回 content + tool_calls。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. ReactImplAgent.act() 怎么做</h3>
+              <p>如果 <code class="inline">toolCalls</code> 为空，说明模型不再需要工具，agent 设置 FINISHED，并返回最后一条 assistant 内容。</p>
+              <p>如果有工具调用，它会调用 <code class="inline">executeTools(toolCalls)</code> 并发执行，然后把每个工具结果作为 TOOL message 写入 memory。下一轮 <code class="inline">think()</code> 就能看到工具结果，继续决策。</p>
+              <pre><code>ReactImplAgent.act()
+  if toolCalls empty:
+    state = FINISHED
+    return final answer
+
+  results = executeTools(toolCalls)
+  for each result:
+    memory.add(toolMessage(result))
+  return joined results</code></pre>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. ReactHandlerImpl：ReAct 模式外壳</h3>
+              <p><code class="inline">ReactHandlerImpl.handle()</code> 很直接：</p>
+              <ol>
+                <li>创建 <code class="inline">ReactImplAgent</code>。</li>
+                <li>创建 <code class="inline">SummaryAgent</code>。</li>
+                <li>执行 <code class="inline">executor.run(request.getQuery())</code>。</li>
+                <li>用 SummaryAgent 根据 executor memory 汇总任务。</li>
+                <li>把 taskSummary 和 fileList 通过 printer 发送。</li>
+              </ol>
+              <p>所以 ReAct 模式是“一个 agent 自己一路工具循环到底，然后总结”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. Plan-Solve 模式入口</h3>
+              <p><code class="inline">PlanSolveHandlerImpl.handle()</code> 是 Plan-Solve 的总控。它先做 <code class="inline">handleSopRecall()</code>，把相似 SOP 召回内容注入 <code class="inline">sopPrompt</code>，然后创建三个角色：</p>
+              <ul>
+                <li><code class="inline">PlanningAgent</code>：负责计划。</li>
+                <li><code class="inline">ExecutorAgent</code>：负责执行任务。</li>
+                <li><code class="inline">SummaryAgent</code>：负责最终汇总。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. PlanningAgent 怎么创建/更新计划</h3>
+              <p><code class="inline">PlanningAgent</code> 也是 <code class="inline">ReActAgent</code> 的子类，但它的 availableTools 只添加了一个特殊工具：<code class="inline">PlanningTool</code>。</p>
+              <p><code class="inline">PlanningTool</code> 支持四个命令：</p>
+              <ul>
+                <li><code class="inline">create</code>：创建 plan。</li>
+                <li><code class="inline">update</code>：更新 steps。</li>
+                <li><code class="inline">mark_step</code>：标记步骤状态。</li>
+                <li><code class="inline">finish</code>：把计划置为完成。</li>
+              </ul>
+              <p>Plan 对象保存 title、steps、stepStatus、notes，并能返回当前 <code class="inline">in_progress</code> 的 step。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. ExecutorAgent 怎么执行任务</h3>
+              <p><code class="inline">ExecutorAgent</code> 和 <code class="inline">ReactImplAgent</code> 很像，也是 think/act 工具循环。但它使用 executor 的 prompt 和 model，并且在 <code class="inline">run(request)</code> 前会调用 <code class="inline">generateDigitalEmployee(request)</code>，为当前 task 生成工具对应的“数字员工”角色提示。</p>
+              <p>当 ExecutorAgent 没有 tool calls 时，它会 FINISHED，并可根据配置清理工具消息上下文，返回任务完成描述或最后内容。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>9. Plan-Solve 的循环怎么串起来</h3>
+              <p>核心循环在 <code class="inline">PlanSolveHandlerImpl</code>：</p>
+              <pre><code>planningResult = planning.run(query)
+
+while stepIdx &lt;= maxStepNum:
+  tasks = planningResult.split("&lt;sep&gt;")
+  executorResult = run executor on task(s)
+  planningResult = planning.run(executorResult)
+
+  if planningResult == "finish":
+    summary.summaryTaskResult(...)
+    send result
+    break</code></pre>
+              <p>也就是说，planner 第一次根据用户 query 出计划和当前任务；executor 执行任务；执行结果再变成 planner 的下一轮输入。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>10. 并行子任务怎么实现</h3>
+              <p>如果 <code class="inline">planningResult</code> 被 <code class="inline">&lt;sep&gt;</code> 拆成多个 task，代码会创建多个 <code class="inline">ExecutorAgent</code> 副本，用 <code class="inline">ThreadUtil.execute()</code> 并发跑，用 <code class="inline">CountDownLatch</code> 等待全部结束。</p>
+              <p>并发完成后，把每个 slave executor 从 <code class="inline">memoryIndex</code> 之后新增的 message 合并回主 executor memory。这就是它的 fan-out / fan-in。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>Handler 选择。</strong><code class="inline">AgentHandlerFactory</code> 根据 <code class="inline">support()</code> 选择 <code class="inline">ReactHandlerImpl</code> 或 <code class="inline">PlanSolveHandlerImpl</code>。</div>
+            <div class="flow-step" data-step="2"><strong>ReAct 路径。</strong>创建 <code class="inline">ReactImplAgent</code>，循环 <code class="inline">think → act</code>，直到没有工具调用。</div>
+            <div class="flow-step" data-step="3"><strong>Plan-Solve 路径。</strong>创建 <code class="inline">PlanningAgent</code>、<code class="inline">ExecutorAgent</code>、<code class="inline">SummaryAgent</code>。</div>
+            <div class="flow-step" data-step="4"><strong>规划。</strong><code class="inline">PlanningAgent</code> 只通过 <code class="inline">PlanningTool</code> 创建/更新/完成计划。</div>
+            <div class="flow-step" data-step="5"><strong>执行。</strong><code class="inline">ExecutorAgent</code> 用完整工具集合执行当前 task；多个 task 可并发。</div>
+            <div class="flow-step" data-step="6"><strong>总结。</strong><code class="inline">SummaryAgent</code> 读取 executor memory 和 productFiles，生成 taskSummary + fileList。</div>
+          </div>
+
+          <pre><code>Source-level comparison
+
+REACT implementation:
+  ReactHandlerImpl.handle()
+    -> new ReactImplAgent(context)
+    -> executor.run(query)
+       -> BaseAgent.run()
+          -> ReActAgent.step()
+             -> ReactImplAgent.think()
+                -> LLM.askTool(... ToolCollection ...)
+             -> ReactImplAgent.act()
+                -> executeTools(toolCalls)
+                -> memory.add(tool result)
+    -> SummaryAgent.summaryTaskResult(...)
+    -> printer.send("result", ...)
+
+PLAN_SOLVE implementation:
+  PlanSolveHandlerImpl.handle()
+    -> handleSopRecall()
+    -> new PlanningAgent(context)
+    -> new ExecutorAgent(context)
+    -> new SummaryAgent(context)
+    -> planning.run(query)
+       -> PlanningAgent uses PlanningTool only
+       -> returns current task(s) or finish
+    -> executor.run(task)
+       -> ExecutorAgent uses ToolCollection
+    -> planning.run(executorResult)
+    -> repeat until finish / max step / error
+    -> SummaryAgent.summaryTaskResult(...)
+    -> printer.send("result", ...)</code></pre>
+
+          <div class="callout"><strong>源码级结论：</strong>ReAct 是单执行器工具循环；Plan-Solve 是规划器和执行器的外层循环。两者底层都复用 <code class="inline">BaseAgent.run()</code>、<code class="inline">ReActAgent.step()</code>、<code class="inline">LLM.askTool()</code>、<code class="inline">ToolCollection.execute()</code>。区别在于：ReAct 直接用完整工具集合解决问题；Plan-Solve 先用 PlanningTool 管计划，再把具体 task 派给 ExecutorAgent。</div>
+          <div class="refs">参考源码：<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/service/impl/ReactHandlerImpl.java</code>、<code class="inline">PlanSolveHandlerImpl.java</code>、<code class="inline">BaseAgent.java</code>、<code class="inline">ReActAgent.java</code>、<code class="inline">ReactImplAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">SummaryAgent.java</code>、<code class="inline">PlanningTool.java</code>、<code class="inline">Plan.java</code>、<code class="inline">LLM.java</code>、<code class="inline">ToolCollection.java</code></div>
         </section>
 
         <section class="section reveal" id="planning-s1">
