@@ -973,7 +973,7 @@
         <details class="toc-group" id="hermesSandboxTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent 沙箱</span>
-            <span class="toc-count">5 sections</span>
+            <span class="toc-count">6 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-sandbox-overview">01 · 概览</a>
@@ -981,6 +981,7 @@
             <a href="#hermes-sandbox-highlights">03 · 沙箱有哪些亮点功能，有什么意义</a>
             <a href="#hermes-sandbox-isolation-basics">04 · 沙箱到底怎么隔离：Terminal Backend 和 Docker bind mount 是什么</a>
             <a href="#hermes-docker-sandbox-threats">05 · Docker 沙箱到底防住了哪些危险，哪些防不住</a>
+            <a href="#hermes-sandbox-context-engineering">06 · 沙箱能不能做上下文工程：工具过程不进上下文，只返回结果</a>
           </div>
         </details>
       </nav>
@@ -2951,6 +2952,113 @@ Practical rule:
 
           <div class="callout"><strong>真正要记住：</strong>Docker 沙箱不是让 agent “绝对安全”，而是把风险从“整台机器和所有私人文件”缩小到“容器 + 你主动挂进去的目录 + 你主动给进去的凭据”。这个风险缩小，就是它最大的意义。</div>
           <div class="refs">参考：<code class="inline">/root/hermes/tools/environments/docker.py</code> 的 security args、resource args、bind mount 逻辑；<code class="inline">/root/hermes/cli-config.yaml.example:160-210</code> 的 Docker 配置说明。</div>
+        </section>
+
+        <section class="section reveal" id="hermes-sandbox-context-engineering">
+          <div class="section-header"><div class="index">HS6</div><h2>沙箱能不能做上下文工程：工具过程不进上下文，只返回结果</h2></div>
+          <p>你记的是对的。沙箱除了“安全隔离”，还有一个很重要的用途：<strong>上下文工程</strong>。具体说，就是把很多细碎、冗长、低价值的工具调用过程放到一个受控执行环境里完成，最后只把筛选后的结论、统计结果、摘要、少量关键证据返回给模型。</p>
+          <div class="callout"><strong>关键区别：</strong>Docker 沙箱主要解决“在哪里安全执行”；<code class="inline">execute_code</code> 这类工具执行沙箱主要解决“怎么让一堆工具过程不污染主上下文”。两者可以叠加：<code class="inline">execute_code</code> 可以在当前 terminal backend 下面跑，而当前 backend 又可能是 Docker / Modal / Daytona。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 为什么普通工具调用会吃上下文</h3>
+              <p>假设 agent 要排查一个项目里的某个 bug。普通做法可能是：</p>
+              <pre><code>search_files("error")
+read_file(file1)
+read_file(file2)
+read_file(file3)
+terminal("pytest -q")
+terminal("pytest test_x.py -vv")
+read_file(log)</code></pre>
+              <p>每次工具调用的完整输出都会进入对话历史。很多输出只是中间过程：重复日志、无关文件片段、pytest 噪声、安装 warning。它们会挤占模型上下文，让真正重要的信息被淹没。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 沙箱式上下文工程怎么做</h3>
+              <p>更好的做法是把“搜索、读取、过滤、统计、运行命令、提取关键行”放进一个脚本里，让脚本在沙箱里调用工具，最后只 <code class="inline">print</code> 精炼结果。</p>
+              <pre><code>execute_code:
+  from hermes_tools import search_files, read_file, terminal
+
+  matches = search_files("AuthError", path="src")
+  candidate_files = pick_top_files(matches)
+  snippets = [extract_relevant(read_file(f)) for f in candidate_files]
+  test = terminal("pytest tests/auth -q")
+
+  print({
+    "likely_files": candidate_files[:3],
+    "key_snippets": snippets[:5],
+    "test_failure_summary": summarize(test)
+  })</code></pre>
+              <p>模型看到的不是 20 次工具调用的原始过程，而是这个脚本整理后的一个小结果。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. Hermes 里确实有这个设计</h3>
+              <p>Hermes 的 <code class="inline">execute_code</code> 描述里明确写了：适合需要 3 次以上工具调用、需要在工具调用之间做处理逻辑、需要在大输出进入上下文前过滤/压缩、需要循环或条件分支的场景。</p>
+              <p>它会生成受控的 <code class="inline">hermes_tools.py</code>，脚本通过这个模块调用白名单工具。最后返回给主模型的是脚本 stdout，而不是每个内部工具调用的完整原始轨迹。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 这和 Docker 沙箱不是一回事</h3>
+              <p>Docker 沙箱回答的是：命令在哪里跑、文件系统隔离到什么程度、依赖会不会污染宿主机。</p>
+              <p><code class="inline">execute_code</code> 回答的是：多步工具过程如何在一个脚本里完成，只把最终结果放回模型上下文。</p>
+              <div class="callout">所以你记的“工具执行放进沙箱，只返回结果”更接近 <code class="inline">execute_code</code> / 子代理 / worker 这类上下文隔离思路，不只是 Docker 容器隔离。</div>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 为什么它能减少上下文污染</h3>
+              <p>因为主模型不需要看每一步原始输出。脚本内部可以自己做：</p>
+              <ul>
+                <li>过滤：只保留匹配关键字的行。</li>
+                <li>聚合：把 100 个搜索结果统计成 top 10 文件。</li>
+                <li>截断：只保留错误栈 head/tail。</li>
+                <li>去重：重复 warning 只留一种。</li>
+                <li>排序：按相关性、失败频率、修改时间排序。</li>
+                <li>摘要：把长日志变成结构化 JSON。</li>
+              </ul>
+              <p>这就是上下文工程：不是让模型少干活，而是让模型只看对决策有价值的信息。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. Hermes 还做了硬限制</h3>
+              <p><code class="inline">execute_code</code> 有执行限制：5 分钟 timeout、stdout 上限、最多工具调用次数。普通 terminal 输出也有默认截断逻辑，会保留 head 和 tail，避免超长输出直接塞满上下文。</p>
+              <p>这些限制不是为了“美观”，而是为了让 agent 的工具输出可控：既能执行复杂任务，又不会让一个日志文件或测试输出把模型窗口打爆。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>主模型提出调查目标。</strong>例如“找出 auth 测试失败的根因”。</div>
+            <div class="flow-step" data-step="2"><strong>把低级工具流水线放进沙箱。</strong>搜索文件、读片段、跑测试、解析日志都在 <code class="inline">execute_code</code> 内部完成。</div>
+            <div class="flow-step" data-step="3"><strong>脚本内部过滤和压缩。</strong>丢掉无关日志，只保留关键文件、关键行、失败摘要。</div>
+            <div class="flow-step" data-step="4"><strong>只返回决策材料。</strong>主模型收到结构化结果，而不是一大坨中间过程。</div>
+            <div class="flow-step" data-step="5"><strong>主模型做高层判断。</strong>基于压缩后的证据决定改哪个文件、跑哪个验证。</div>
+            <div class="flow-step" data-step="6"><strong>必要时再展开。</strong>如果摘要不够，再按需读取具体文件或日志，不提前污染上下文。</div>
+          </div>
+
+          <pre><code>Context engineering mental model
+
+bad pattern:
+  model sees every raw tool output
+  -> search noise
+  -> long logs
+  -> repeated warnings
+  -> irrelevant file chunks
+  -> context gets polluted
+
+better pattern:
+  execute_code / worker / sandbox does the noisy work
+  -> call tools internally
+  -> filter, rank, dedupe, summarize
+  -> return compact JSON / bullet summary / key snippets
+  -> model sees only decision-grade information
+
+important:
+  Docker sandbox = execution isolation
+  execute_code sandbox = tool-process/context isolation
+  together = safer execution + cleaner context</code></pre>
+
+          <div class="callout"><strong>最终结论：</strong>你记得没错。沙箱可以用于上下文工程，但这里的“沙箱”更多指一个受控的工具执行空间：让冗长工具过程在里面发生，只把压缩后的结果交给主模型。Docker 解决安全边界，<code class="inline">execute_code</code> / worker 解决上下文边界。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tools/code_execution_tool.py:1708-1739</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:1375-1381</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:2044-2078</code>、<code class="inline">/root/hermes/tools/tool_output_limits.py</code></div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
