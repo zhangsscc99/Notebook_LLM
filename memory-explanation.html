@@ -909,10 +909,11 @@
         <details class="toc-group" id="joyAgentTocGroup" open>
           <summary>
             <span class="toc-group-title">京东Joy Agent</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#joyagent-overview">01 · 概览介绍京东 JoyAgent-JDGenie</a>
+            <a href="#joyagent-workflow-langgraph">02 · JoyAgent 工作流编排怎么做，用了什么 Agent 框架；如果用 LangGraph 怎么设计</a>
           </div>
         </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
@@ -2020,6 +2021,179 @@ deliverables
 
           <div class="callout"><strong>概览结论：</strong>京东 JoyAgent-JDGenie 的看点是“完整产品化”。它不是只展示一个 agent loop，而是把多 Agent 编排、工具服务、前端交互、SSE 流式输出、报告/PPT/数据分析交付整合成一个可运行应用。</div>
           <div class="refs">参考：<code class="inline">/root/joyagent-jdgenie/README.md</code>、<code class="inline">/root/joyagent-jdgenie/README_EN.md</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/README.md</code>、<code class="inline">/root/joyagent-jdgenie/genie-tool/README.md</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/agent/enums/AgentType.java</code>、<code class="inline">/root/joyagent-jdgenie/ui/package.json</code></div>
+        </section>
+
+        <section class="section reveal" id="joyagent-workflow-langgraph">
+          <div class="section-header"><div class="index">J2</div><h2>JoyAgent 工作流编排怎么做，用了什么 Agent 框架；如果用 LangGraph 怎么设计</h2></div>
+          <p>从源码看，JoyAgent-JDGenie 不是直接套 LangGraph、CrewAI、AutoGen 这类现成 Python agent 框架，而是自己在 Java/Spring Boot 后端里实现了一套轻量 agent runtime：<strong>Controller 接请求、AgentHandlerFactory 选模式、BaseAgent/ReActAgent 跑循环、ToolCollection 管工具、LLM 类做 function calling、SSEPrinter 做流式输出</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>JoyAgent 的工作流编排是“自研 Java Agent 框架 + Spring Boot 服务化 + Python 工具服务”的组合；核心模式是 ReAct 和 Plan-Solve，不是 LangGraph 图编排，但可以很自然地用 LangGraph 重写成显式状态图。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 入口：前端请求进入 Spring Boot</h3>
+              <p>前端调用后端流式接口，例如 <code class="inline">/web/api/v1/gpt/queryAgentStreamIncr</code>。后端 <code class="inline">GptProcessServiceImpl</code> 创建 <code class="inline">SseEmitter</code>，再交给 <code class="inline">MultiAgentServiceImpl</code> 或 <code class="inline">/AutoAgent</code> 处理。</p>
+              <p>所以 JoyAgent 的第一层编排是产品服务层：请求 id、trace id、SSE 长连接、心跳、输出样式、前端实时展示都在这里处理。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. AgentContext：一次任务的共享状态</h3>
+              <p><code class="inline">GenieController</code> 会构造 <code class="inline">AgentContext</code>，里面包含 requestId、sessionId、query、printer、toolCollection、dateInfo、productFiles、taskProductFiles、sopPrompt、basePrompt、agentType、templateType 等。</p>
+              <p>这相当于 JoyAgent 的 run state。规划器、执行器、总结器、工具都通过这个 context 共享任务状态和交付物列表。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. AgentHandlerFactory：按模式路由</h3>
+              <p><code class="inline">AgentHandlerFactory</code> 注入所有 <code class="inline">AgentHandlerService</code> 实现，然后调用每个 handler 的 <code class="inline">support(context, request)</code> 判断该走哪条处理路径。</p>
+              <p>目前能看到的核心处理器包括 <code class="inline">PlanSolveHandlerImpl</code> 和 <code class="inline">ReactHandlerImpl</code>。Agent 类型枚举包括 <code class="inline">COMPREHENSIVE</code>、<code class="inline">WORKFLOW</code>、<code class="inline">PLAN_SOLVE</code>、<code class="inline">ROUTER</code>、<code class="inline">REACT</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. ReAct 模式：单 agent 工具循环</h3>
+              <p><code class="inline">ReactHandlerImpl</code> 创建 <code class="inline">ReactImplAgent</code> 和 <code class="inline">SummaryAgent</code>。<code class="inline">ReactImplAgent</code> 继承 <code class="inline">ReActAgent</code>，每一步就是 <code class="inline">think()</code> + <code class="inline">act()</code>。</p>
+              <p><code class="inline">think()</code> 调 LLM 的 <code class="inline">askTool</code>，让模型基于 tools schema 选择工具；<code class="inline">act()</code> 执行 tool calls，把 tool result 写回 memory。没有工具调用时进入 FINISHED，再由 SummaryAgent 汇总结果和文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. Plan-Solve 模式：规划器 + 执行器 + 总结器</h3>
+              <p><code class="inline">PlanSolveHandlerImpl</code> 是更像多智能体的主流程：先做 SOP recall，再创建 <code class="inline">PlanningAgent</code>、<code class="inline">ExecutorAgent</code>、<code class="inline">SummaryAgent</code>。</p>
+              <p>规划器生成当前要执行的 task；执行器执行 task；执行结果再喂回规划器，规划器判断继续、更新计划、还是返回 <code class="inline">finish</code>。最后 SummaryAgent 根据 executor memory 汇总任务结果和交付文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 并发执行：多个子任务可并行</h3>
+              <p>Plan-Solve 里如果规划结果用 <code class="inline">&lt;sep&gt;</code> 拆成多个任务，会创建多个 <code class="inline">ExecutorAgent</code> 副本，并用 <code class="inline">ThreadUtil</code> + <code class="inline">CountDownLatch</code> 并发执行。</p>
+              <p>执行完后，它把 slave executor 的 memory 合并回主 executor memory。这就是 JoyAgent 的一个关键编排点：规划器可以一次发出多个并行 task，执行器并行跑，然后汇总结果再继续规划。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. 工具系统：ToolCollection + MCP</h3>
+              <p><code class="inline">ToolCollection</code> 管内置工具和 MCP 工具。内置工具包括 file、code interpreter、report、deep search、data analysis 等；MCP 工具通过 <code class="inline">McpTool</code> listTool 后动态加入。</p>
+              <p>LLM 的 <code class="inline">askTool</code> 会把这些工具转成 function calling schema；模型返回 tool_calls 后，<code class="inline">BaseAgent.executeTools</code> 可以并发执行多个工具调用。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 它用了什么 Agent 框架</h3>
+              <p>严格说：它没有用 LangGraph 这类外部图框架。它的 agent 框架是项目内自研的 Java 类体系：</p>
+              <ul>
+                <li><code class="inline">BaseAgent</code>：状态、memory、maxSteps、run loop、工具执行。</li>
+                <li><code class="inline">ReActAgent</code>：抽象 <code class="inline">think()</code> / <code class="inline">act()</code>。</li>
+                <li><code class="inline">PlanningAgent</code>：计划创建和更新。</li>
+                <li><code class="inline">ExecutorAgent</code> / <code class="inline">ReactImplAgent</code>：工具调用执行器。</li>
+                <li><code class="inline">SummaryAgent</code>：最终结果汇总。</li>
+              </ul>
+            </article>
+          </div>
+
+          <pre><code>JoyAgent current workflow
+
+UI request
+  -> GenieController / GptProcessService
+  -> SseEmitter + heartbeat
+  -> build AgentContext
+  -> build ToolCollection
+  -> AgentHandlerFactory selects handler
+
+REACT mode:
+  ReactImplAgent.run(query)
+    -> loop BaseAgent.run
+      -> think(): LLM askTool
+      -> act(): execute tools, append tool results
+    -> SummaryAgent summarizes
+    -> SSE result
+
+PLAN_SOLVE mode:
+  SOP recall
+  -> PlanningAgent creates/updates plan
+  -> current task(s)
+  -> ExecutorAgent executes task(s)
+      -> parallel executors if multiple &lt;sep&gt; tasks
+  -> executor result back to planner
+  -> repeat until finish / max steps / error
+  -> SummaryAgent summarizes
+  -> SSE result</code></pre>
+
+          <div class="callout"><strong>所以它现在的编排风格：</strong>不是图引擎，而是 imperative loop：Java while loop + agent class + handler routing + tool function calling + SSE streaming。优点是直接、产品工程好接；缺点是状态机边界、恢复、checkpoint、可视化和复杂分支会比 LangGraph 难管理。</div>
+
+          <h3>如果用 LangGraph 重新设计 JoyAgent</h3>
+          <p>用 LangGraph 重做，不应该简单把 JoyAgent 包成一个大 node，而应该把它现有的关键角色提升为显式节点：入口节点、SOP 召回、工具构建、规划节点、执行节点、并行子任务、总结节点、文件产物节点、SSE 事件节点。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>State 设计</h3>
+              <p>定义 <code class="inline">JoyAgentState</code>：query、request_id、agent_type、messages、plan、current_tasks、task_results、tool_results、product_files、sop_prompt、base_prompt、output_style、stream_events、error、step_count。</p>
+              <p>这对应现在的 <code class="inline">AgentContext + Memory + PlanningTool.plan + productFiles</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>节点拆分</h3>
+              <ul>
+                <li><code class="inline">ingress_node</code>：解析请求、创建初始 state。</li>
+                <li><code class="inline">sop_recall_node</code>：召回 SOP 并注入 prompt。</li>
+                <li><code class="inline">tool_registry_node</code>：构建 ToolCollection/MCP tools。</li>
+                <li><code class="inline">route_mode_node</code>：按 agentType 分到 react 或 plan_solve。</li>
+                <li><code class="inline">planner_node</code>：生成/更新 plan 和 current_tasks。</li>
+                <li><code class="inline">executor_node</code>：执行单个 task 的 ReAct 工具循环。</li>
+                <li><code class="inline">summary_node</code>：汇总任务和文件。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>并行子任务怎么做</h3>
+              <p>当前 JoyAgent 用 <code class="inline">&lt;sep&gt;</code> 拆任务并手写线程。LangGraph 里可以用 <code class="inline">Send</code> 把多个 current_tasks fan-out 到多个 executor 子图，再 fan-in 合并 task_results。</p>
+              <p>每个 executor 子图有自己的 messages/tool_results，最终只把 task summary 和 product_files 合回主 state，避免上下文互相污染。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>ReAct 工具循环怎么做</h3>
+              <p>可以用 LangGraph 的 <code class="inline">StateGraph</code> + 条件边：<code class="inline">llm_node</code> 产生 tool_calls；如果有 tool_calls 进入 <code class="inline">ToolNode</code>；工具结果回到 <code class="inline">llm_node</code>；如果没有 tool_calls，结束当前 task。</p>
+              <p>这对应现在 <code class="inline">ReActAgent.step()</code> 的 <code class="inline">think()</code> + <code class="inline">act()</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>SSE 流式输出怎么保留</h3>
+              <p>LangGraph 节点执行时产生事件：plan_thought、tool_thought、tool_result、task_summary、result。后端把 LangGraph stream events 映射成现在前端已经理解的 SSE 消息类型。</p>
+              <p>这样前端不用大改，主要替换后端编排引擎。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>比现在强在哪里</h3>
+              <p>LangGraph 会让 checkpoint、resume、人审 interrupt、并行 fan-out/fan-in、状态可视化、错误恢复更清晰。尤其 JoyAgent 这种“规划-并行执行-汇总-再规划”的模式，本质上很适合图。</p>
+            </article>
+          </div>
+
+          <pre><code>LangGraph version of JoyAgent
+
+START
+  -> ingress_node
+  -> build_context_node
+  -> sop_recall_node
+  -> tool_registry_node
+  -> route_mode_node
+
+route_mode_node:
+  if agent_type == REACT:
+    -> react_subgraph
+    -> summary_node
+    -> END
+
+  if agent_type == PLAN_SOLVE:
+    -> planner_node
+    -> conditional:
+        finish -> summary_node -> END
+        tasks  -> Send(task_i, executor_subgraph) in parallel
+              -> merge_task_results_node
+              -> planner_node
+        error  -> error_node -> END
+
+executor_subgraph:
+  task_start
+  -> llm_tool_node
+  -> conditional:
+       has_tool_calls -> ToolNode -> llm_tool_node
+       no_tool_calls  -> task_summary_node -> END</code></pre>
+
+          <div class="callout"><strong>设计结论：</strong>JoyAgent 当前是自研 Java agent loop；如果用 LangGraph，核心不是换语言炫技，而是把它已有的 PlanSolve、ReAct、并行 Executor、Summary、SSE 事件、productFiles 状态显式图化。这样复杂任务会更可恢复、更可观测，也更容易扩展成人审、失败重试和多工作流。</div>
+          <div class="refs">参考：<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/controller/GenieController.java</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/service/impl/PlanSolveHandlerImpl.java</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/service/impl/ReactHandlerImpl.java</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/agent/agent/BaseAgent.java</code>、<code class="inline">ReActAgent.java</code>、<code class="inline">PlanningAgent.java</code>、<code class="inline">ExecutorAgent.java</code>、<code class="inline">ToolCollection.java</code>、<code class="inline">LLM.java</code></div>
         </section>
 
         <section class="section reveal" id="planning-s1">
