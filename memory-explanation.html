@@ -906,6 +906,15 @@
             <a href="#s34">34 · 分层记忆和会话怎么记住</a>
           </div>
         </details>
+        <details class="toc-group" id="joyAgentTocGroup" open>
+          <summary>
+            <span class="toc-group-title">京东Joy Agent</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#joyagent-overview">01 · 概览介绍京东 JoyAgent-JDGenie</a>
+          </div>
+        </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
@@ -1918,6 +1927,99 @@ memory_get({
 }</code></pre>
           <div class="callout">关键区别：当前会话靠 session transcript 延续；长期事实靠 Markdown memory 保存；跨会话召回可以靠可选的 session transcript indexing。时间戳帮助排序、生命周期和 daily 文件组织，但不是唯一的“记住机制”。</div>
           <div class="refs">参考：<code class="inline">docs/concepts/session.md</code>、<code class="inline">docs/concepts/agent.md</code>、<code class="inline">docs/reference/memory-config.md</code>、<code class="inline">docs/concepts/memory-qmd.md</code>、<code class="inline">packages/memory-host-sdk/src/host/session-files.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="joyagent-overview">
+          <div class="section-header"><div class="index">J1</div><h2>概览介绍京东 JoyAgent-JDGenie</h2></div>
+          <p><strong>JoyAgent-JDGenie</strong> 是京东开源的端到端多智能体产品。它和很多“只给 SDK / framework”的 agent 项目不同，仓库里直接包含前端、后端、工具服务、Agent 编排逻辑和多个预置子智能体，目标是让用户可以比较快地跑起一个完整的多 Agent 应用。</p>
+          <div class="callout"><strong>一句话：</strong>JoyAgent-JDGenie 不是单纯的 agent 框架，而是一个“产品化多智能体系统”：用户输入一个任务，它通过规划、子任务执行、工具调用、报告/PPT/文件交付等链路，直接产出可用结果。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 它解决什么问题</h3>
+              <p>README 里把它定位为“解决快速构建多智能体产品的最后一公里问题”。意思是：很多开源 agent 项目只提供底层框架，用户还要自己补 UI、后端、工具服务、任务流、文件产物、部署脚本。</p>
+              <p>JoyAgent-JDGenie 则把这些东西放在一个完整产品里：用户可以直接提交复杂任务，比如趋势分析、报告生成、PPT 生成、表格分析，而不是先自己从零搭一个 agent app。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 仓库整体结构</h3>
+              <p>这个项目是多模块组合：</p>
+              <ul>
+                <li><code class="inline">ui/</code>：React + Vite 前端界面。</li>
+                <li><code class="inline">genie-backend/</code>：Java Spring Boot 后端，负责请求入口、SSE 流式输出、多 Agent 请求封装、模型/配置/数据服务。</li>
+                <li><code class="inline">genie-tool/</code>：Python FastAPI 工具服务，包含 deepsearch、report、code interpreter、NL2SQL、table RAG、auto analysis 等工具能力。</li>
+                <li><code class="inline">genie-client/</code>：工具调用 API / MCP client 适配服务。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 多智能体能力</h3>
+              <p>后端代码里能看到多种 Agent 类型：<code class="inline">COMPREHENSIVE</code>、<code class="inline">WORKFLOW</code>、<code class="inline">PLAN_SOLVE</code>、<code class="inline">ROUTER</code>、<code class="inline">REACT</code>。README 也强调它支持 React 模式、Plan and Executor 模式等核心 agent 模式。</p>
+              <p>这说明 JoyAgent 的核心不是单轮 LLM 问答，而是把复杂任务拆成计划、执行、工具调用、结果汇总、多轮流式反馈。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 预置子智能体和工具</h3>
+              <p>README 提到预置了报告生成智能体、代码智能体、PPT 智能体、文件智能体等。<code class="inline">genie-tool</code> 里也能看到 <code class="inline">report.py</code>、<code class="inline">ci_agent.py</code>、<code class="inline">code_interpreter.py</code>、<code class="inline">deepsearch.py</code>、<code class="inline">nl2sql.py</code>、<code class="inline">table_rag/</code> 等工具实现。</p>
+              <p>它的交付形式也偏产品：不是只返回一段文本，而是可以生成 HTML、PPT、Markdown 等文件产物。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 技术栈特点</h3>
+              <p>前端是 React 19、Ant Design、Vite；后端是 Spring Boot + SSE + OkHttp；工具层是 Python 3.11+ FastAPI 风格服务；数据/检索相关能看到 Qdrant、Elasticsearch、MySQL、ClickHouse、Calcite、H2 等依赖和实现。</p>
+              <p>这个技术栈不是“最小 demo”，而是更像企业内部 agent 产品的架构：前端交互、Java 服务编排、Python 工具执行、数据检索/分析服务分层。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 它和 Hermes / OpenClaw 的差异</h3>
+              <p>Hermes 更偏个人 agent runtime、工具执行、skills、自改进和沙箱后端；OpenClaw 的 memory 重点是记忆系统和跨会话检索。</p>
+              <p>JoyAgent-JDGenie 更像一个完整的<strong>多智能体产品套件</strong>：它关注 UI、报告/PPT 交付、多 Agent 编排、数据分析、深度搜索和工具服务整合。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>用户输入任务。</strong>前端把 query、文件、配置等交给后端。</div>
+            <div class="flow-step" data-step="2"><strong>后端封装 AgentRequest。</strong><code class="inline">genie-backend</code> 根据请求构造多 Agent 调用，并通过 SSE 把过程流式推给前端。</div>
+            <div class="flow-step" data-step="3"><strong>选择 Agent 模式。</strong>不同请求可进入 React、Plan-Solve、Workflow、Router 等不同处理路径。</div>
+            <div class="flow-step" data-step="4"><strong>调用工具服务。</strong>复杂能力下沉到 <code class="inline">genie-tool</code>，比如搜索、代码解释器、报表、NL2SQL、表格 RAG、数据分析。</div>
+            <div class="flow-step" data-step="5"><strong>产出结构化结果。</strong>系统不只返回聊天文本，还可以生成报告、PPT、Markdown、HTML、表格分析等文件型产物。</div>
+            <div class="flow-step" data-step="6"><strong>支持二次开发。</strong>新场景可以挂载新的子 Agent 或工具，复用已有 UI、后端流式协议和工具服务。</div>
+          </div>
+
+          <pre><code>JoyAgent-JDGenie mental model
+
+UI
+  -> React / Vite / Ant Design product interface
+
+genie-backend
+  -> Spring Boot request entry
+  -> AgentRequest construction
+  -> multi-agent routing
+  -> SSE streaming response
+
+agent modes
+  -> REACT
+  -> PLAN_SOLVE
+  -> WORKFLOW
+  -> ROUTER
+  -> COMPREHENSIVE
+
+genie-tool
+  -> deep search
+  -> code interpreter
+  -> report generation
+  -> NL2SQL / table RAG
+  -> data analysis
+
+deliverables
+  -> answer
+  -> report
+  -> PPT
+  -> Markdown / HTML
+  -> table analysis</code></pre>
+
+          <div class="callout"><strong>概览结论：</strong>京东 JoyAgent-JDGenie 的看点是“完整产品化”。它不是只展示一个 agent loop，而是把多 Agent 编排、工具服务、前端交互、SSE 流式输出、报告/PPT/数据分析交付整合成一个可运行应用。</div>
+          <div class="refs">参考：<code class="inline">/root/joyagent-jdgenie/README.md</code>、<code class="inline">/root/joyagent-jdgenie/README_EN.md</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/README.md</code>、<code class="inline">/root/joyagent-jdgenie/genie-tool/README.md</code>、<code class="inline">/root/joyagent-jdgenie/genie-backend/src/main/java/com/jd/genie/agent/enums/AgentType.java</code>、<code class="inline">/root/joyagent-jdgenie/ui/package.json</code></div>
         </section>
 
         <section class="section reveal" id="planning-s1">
