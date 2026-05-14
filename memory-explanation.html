@@ -973,7 +973,7 @@
         <details class="toc-group" id="hermesSandboxTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent 沙箱</span>
-            <span class="toc-count">9 sections</span>
+            <span class="toc-count">10 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-sandbox-overview">01 · 概览</a>
@@ -985,6 +985,7 @@
             <a href="#hermes-sandbox-options-selection">07 · Hermes 支持哪些沙箱方案：技术选型优劣对比</a>
             <a href="#hermes-execute-code-explained">08 · Hermes Agent 的 execute_code 是什么</a>
             <a href="#hermes-vercel-sandbox-analysis">09 · Hermes Agent 接云端 Vercel Sandbox 有什么好处：优劣分析</a>
+            <a href="#hermes-vercel-editfile-flow">10 · 接 Vercel Sandbox 后改一个文件到底发生在哪，怎么回传本地</a>
           </div>
         </details>
       </nav>
@@ -3381,6 +3382,104 @@ compare:
 
           <div class="callout"><strong>最终建议：</strong>如果 Hermes Agent 的任务主要是前端、Node、Web preview、Vercel 项目自动化，接 Vercel Sandbox 很有价值；如果你要的是通用代码沙箱，Docker 更直接；如果你要云端长期 workspace，Daytona 更像开发机；如果你要弹性计算或 RL rollout，Modal 往往更通用。</div>
           <div class="refs">参考：<code class="inline">/root/hermes/tools/environments/vercel_sandbox.py</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:120-180</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:1216-1231</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:2205-2206</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-vercel-editfile-flow">
+          <div class="section-header"><div class="index">HS10</div><h2>接 Vercel Sandbox 后改一个文件到底发生在哪，怎么回传本地</h2></div>
+          <p>这个问题要拆成三件事：<strong>模型推理在哪里发生</strong>、<strong>文件上下文从哪里来</strong>、<strong>editfile / patch 真正改的是哪里的文件</strong>。接 Vercel Sandbox 后，不是“AI 在本地分析完，只有 editfile 在云端机械执行”这么简单；更准确是：Hermes 主进程负责编排和调用模型，Vercel Sandbox 负责执行 terminal / file backend 里的命令和文件操作。</p>
+          <div class="callout"><strong>最短答案：</strong>模型上下文由 Hermes 主进程组装，里面包括用户问题、历史消息、以及从 Vercel Sandbox 读回来的文件/命令输出；模型基于这些上下文决定怎么改；真正的 <code class="inline">read_file</code> / <code class="inline">patch</code> / <code class="inline">write_file</code> 会通过 Vercel backend 作用在云端 sandbox 文件系统。云端改完不会自动改你的本地项目，除非你显式 git push / download / sync。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. AI 推理在哪里发生</h3>
+              <p>Hermes agent 主进程仍然在你启动 Hermes 的地方运行：可能是本机、VPS、gateway 服务器。它负责保存对话、组装 prompt、调用模型 API、接收模型返回的 tool call。</p>
+              <p>如果你用的是 OpenAI / OpenRouter / Nous Portal 等模型，真正 LLM 推理在对应模型服务商那里；不是在 Vercel Sandbox 里。Vercel Sandbox 主要负责“执行工具命令和文件操作”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 文件上下文从哪里来</h3>
+              <p>模型不是凭空知道云端文件内容。它要先通过工具拿上下文，例如：</p>
+              <pre><code>terminal("git clone ...")
+search_files("functionName", path=".")
+read_file("src/app.ts", offset=1, limit=200)
+terminal("npm test")</code></pre>
+              <p>当 backend 是 <code class="inline">vercel_sandbox</code> 时，这些 search/read/test 命令都在 Vercel 云端文件系统里执行。执行结果返回给 Hermes 主进程，再进入模型上下文。模型是基于这些返回结果判断怎么改文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 修改文件“凭什么修改”</h3>
+              <p>修改不是工具自己决定的。流程是：模型看到了用户需求 + 读文件结果 + 搜索结果 + 测试失败日志，然后输出一个工具调用，例如 patch 某个文件，把 old_string 换成 new_string。</p>
+              <p>也就是说，<strong>修改意图来自模型推理</strong>；<strong>修改落地由 file tool 执行</strong>。file tool 不做产品判断，它只是按模型给出的 patch/write 指令去云端文件系统执行，并返回 diff / success / error。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. editfile 是不是只在云端发生</h3>
+              <p>如果当前 terminal backend 是 <code class="inline">vercel_sandbox</code>，Hermes 的 <code class="inline">ShellFileOperations</code> 会通过 active terminal environment 执行 shell 命令。读文件用云端 <code class="inline">cat</code> / <code class="inline">sed</code>，写文件也通过云端环境落盘。</p>
+              <p><strong>所以是的：</strong>对 sandbox 内文件的 <code class="inline">patch</code> / <code class="inline">write_file</code> 真正发生在 Vercel Sandbox 里，不是直接改本地磁盘。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 改完怎么回传本地</h3>
+              <p>关键点：Vercel Sandbox 不像 Docker bind mount。Docker 可以把本地目录挂成容器 <code class="inline">/workspace</code>，所以容器改文件，本地马上变。但 Vercel 是远端云沙箱，没有直接 bind mount 你的本地目录。</p>
+              <p>所以云端改完要回到本地，通常靠这几种方式：</p>
+              <ul>
+                <li><strong>git push：</strong>云端 clone repo，修改后 commit/push，本地再 pull。</li>
+                <li><strong>download/copy：</strong>显式把修改后的文件从 Vercel sandbox 下载回来。</li>
+                <li><strong>自定义 sync：</strong>你实现项目目录同步逻辑。</li>
+                <li><strong>Hermes 状态同步：</strong>默认更偏 <code class="inline">.hermes</code> 状态，不等于同步整个项目源码树。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 如果本地已有项目，Vercel 怎么改它</h3>
+              <p>Vercel Sandbox 默认不能直接看到你的本地项目目录。你需要先把项目放进云端，例如：</p>
+              <pre><code># option A: cloud clone
+terminal("git clone git@github.com:you/app.git .")
+
+# option B: upload selected files
+upload src/app.ts to sandbox
+
+# option C: generate files in sandbox
+write_file("src/app.ts", content)</code></pre>
+              <p>如果没有把项目放进 Vercel，模型在云端就没有真实项目文件可改。它最多只能基于你贴给它的上下文生成建议，但不能对本地文件产生真实落盘修改。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>配置 Vercel backend。</strong><code class="inline">terminal.backend = "vercel_sandbox"</code>，Hermes 创建/恢复 Vercel 云端 sandbox。</div>
+            <div class="flow-step" data-step="2"><strong>准备项目。</strong>通常在云端 sandbox 里 <code class="inline">git clone</code> 项目，或上传需要修改的文件。</div>
+            <div class="flow-step" data-step="3"><strong>读取上下文。</strong>模型要求 search/read/test；Hermes 在 Vercel 里执行这些工具，把结果返回给模型上下文。</div>
+            <div class="flow-step" data-step="4"><strong>模型决定修改。</strong>LLM 基于文件片段、错误日志、用户目标，生成 patch/write_file 工具调用。</div>
+            <div class="flow-step" data-step="5"><strong>云端执行修改。</strong>file tool 通过 Vercel backend 修改 sandbox 文件系统，并返回 diff / lint / error。</div>
+            <div class="flow-step" data-step="6"><strong>回传结果。</strong>如果要本地也有改动，需要 git push 后本地 pull，或显式下载文件；不会自动 magically 修改本地目录。</div>
+          </div>
+
+          <pre><code>Vercel edit_file mental model
+
+Hermes main process
+  -> owns conversation
+  -> calls model API
+  -> receives tool calls
+  -> routes file/terminal tools to active backend
+
+Vercel Sandbox
+  -> owns remote filesystem
+  -> runs shell commands
+  -> read_file/search_files see remote files
+  -> patch/write_file modify remote files
+
+Model context
+  -> user request
+  -> history
+  -> tool outputs from Vercel reads/tests/searches
+  -> model decides the edit from this context
+
+Back to local
+  -> NOT automatic local bind mount
+  -> use git push/pull, explicit download, or custom sync</code></pre>
+
+          <div class="callout"><strong>最终判断：</strong>接 Vercel Sandbox 后，工具执行和文件修改发生在云端；模型决策发生在 Hermes 编排的对话循环里，依据是云端工具读回来的上下文。改完是否回本地，不是自动的，要靠 git 或显式同步。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tools/environments/vercel_sandbox.py</code>、<code class="inline">/root/hermes/tools/file_operations.py:443-530</code>、<code class="inline">/root/hermes/tools/file_operations.py:823-960</code>、<code class="inline">/root/hermes/tools/file_operations.py:956-1045</code></div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
