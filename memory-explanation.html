@@ -973,12 +973,13 @@
         <details class="toc-group" id="hermesSandboxTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent 沙箱</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">4 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-sandbox-overview">01 · 概览</a>
             <a href="#hermes-sandbox-editfile-flow">02 · 沙箱原理：edit_file / 多文件项目到底怎么改</a>
             <a href="#hermes-sandbox-highlights">03 · 沙箱有哪些亮点功能，有什么意义</a>
+            <a href="#hermes-sandbox-isolation-basics">04 · 沙箱到底怎么隔离：Terminal Backend 和 Docker bind mount 是什么</a>
           </div>
         </details>
       </nav>
@@ -2730,6 +2731,122 @@ with Hermes backend abstraction
 
           <div class="callout"><strong>最终价值：</strong>沙箱让 Hermes 从“会调用工具的聊天机器人”升级成“能安全执行真实工程任务的 agent runtime”。没有这层，agentic RL 训练、SWE benchmark、多文件代码修改、远程长期任务都会非常脆弱。</div>
           <div class="refs">参考：<code class="inline">/root/hermes/README.md:25</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:1-25</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:920-990</code>、<code class="inline">/root/hermes/tools/terminal_tool.py:1107-1246</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:445-489</code>、<code class="inline">/root/hermes/tools/code_execution_tool.py:996-998</code>、<code class="inline">/root/hermes/cli-config.yaml.example:160-248</code></div>
+        </section>
+
+        <section class="section reveal" id="hermes-sandbox-isolation-basics">
+          <div class="section-header"><div class="index">HS4</div><h2>沙箱到底怎么隔离：Terminal Backend 和 Docker bind mount 是什么</h2></div>
+          <p>先把概念拆开：<strong>沙箱隔离</strong>不是一个魔法开关，而是“命令在哪里跑、文件系统看到哪里、网络/进程/资源怎么被限制”的组合。Hermes 自己负责统一调度；真正的隔离能力来自它选择的 <code class="inline">terminal backend</code>，比如 Docker、Modal、Daytona、SSH、Singularity。</p>
+          <div class="callout"><strong>最短答案：</strong><code class="inline">Terminal Backend</code> 就是 Hermes 执行 shell 命令的后端环境；Docker bind mount 就是把宿主机某个目录“挂进”容器里，让容器看到并修改这个目录。隔离的意义是控制 agent 的破坏范围，同时让工程任务可以复现、并行、迁移和训练。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. Terminal Backend 是什么</h3>
+              <p>你可以把 Terminal Backend 理解成：Hermes 收到 <code class="inline">terminal("npm test")</code>、<code class="inline">terminal("pip install ...")</code> 这种命令后，决定<strong>把命令发到哪里执行</strong>的执行器。</p>
+              <pre><code>same agent command:
+  terminal("pytest")
+
+different backend:
+  local       -> 在宿主机直接跑 pytest
+  docker      -> 在 Docker 容器里跑 pytest
+  modal       -> 在 Modal 云沙箱里跑 pytest
+  daytona     -> 在 Daytona workspace 里跑 pytest
+  ssh         -> 在远端服务器里跑 pytest</code></pre>
+              <p>所以 Terminal Backend 不是“终端 UI”，而是 agent 的执行环境抽象。Hermes 的文件工具、后台进程、execute_code 都要尽量跟这个 backend 对齐，避免命令在容器里跑、文件却在宿主机改。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 沙箱隔离到底隔离什么</h3>
+              <p>隔离主要隔离四类东西：</p>
+              <ul>
+                <li><strong>文件系统：</strong>容器默认只能看到容器里的文件，看不到宿主机全部磁盘。</li>
+                <li><strong>进程空间：</strong>容器里启动的进程主要活在容器 namespace 里，不直接混进宿主进程环境。</li>
+                <li><strong>依赖环境：</strong>agent 在容器里装包、改 Python/Node 依赖，不会直接污染宿主机环境。</li>
+                <li><strong>资源边界：</strong>Docker / 云沙箱可以限制 CPU、内存、磁盘，避免一个任务吃掉整台机器。</li>
+              </ul>
+              <p>但注意：隔离不是绝对安全。你如果把宿主目录、Docker socket、SSH key、API key 全挂进去，沙箱边界就会被你主动打开。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. Docker bind mount 是什么</h3>
+              <p><strong>bind mount</strong> 是 Docker 的一种目录挂载：把宿主机目录映射到容器里的某个路径。容器看到的是容器路径，但背后真实文件在宿主机。</p>
+              <pre><code>host:
+  /root/myapp
+
+docker container:
+  /workspace
+
+bind mount:
+  /root/myapp  ->  /workspace</code></pre>
+              <p>结果是：容器里改 <code class="inline">/workspace/src/a.py</code>，其实就是在改宿主机的 <code class="inline">/root/myapp/src/a.py</code>。这不是复制；这是同一批文件的两个视角。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. bind mount 和复制项目的区别</h3>
+              <p>如果是<strong>复制项目</strong>，流程是：先把宿主项目拷一份进容器，容器改自己的副本，最后你还要把改动拷回来或 git push。</p>
+              <p>如果是<strong>bind mount</strong>，流程是：容器直接看到宿主目录，改动立刻落到宿主文件。没有“最后拷回来”这个步骤。</p>
+              <pre><code>copy mode:
+  host project -> copy into container
+  container edits copy
+  need copy back / git push
+
+bind mount mode:
+  host project is mounted as /workspace
+  container edits /workspace
+  host project changes immediately</code></pre>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. Hermes 为什么默认不随便 mount</h3>
+              <p>Hermes 配置里 <code class="inline">docker_mount_cwd_to_workspace</code> 是显式选项。原因很直接：一旦 mount，agent 在容器里就能改你的宿主项目目录。</p>
+              <p>默认不挂载更安全：容器里乱删文件，影响主要在容器内部。你确认要让 agent 修改真实项目时，再打开 mount，把当前目录映射到 <code class="inline">/workspace</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 一个真实例子：让 agent 修项目</h3>
+              <p>假设你要让 Hermes 修 <code class="inline">/root/myapp</code> 里的 bug，并跑测试。你有两种选择：</p>
+              <ul>
+                <li><strong>local backend：</strong>最快，直接改宿主项目；风险是命令也直接影响宿主环境。</li>
+                <li><strong>docker + bind mount：</strong>命令在容器里跑，依赖装在容器里；但代码目录通过 <code class="inline">/workspace</code> 挂进来，文件改动会回到宿主项目。</li>
+              </ul>
+              <p>第二种适合真实开发：代码能保留，依赖污染和危险命令被更多地限制在容器里。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>用户发任务。</strong>例如“修这个 repo 的测试失败”。</div>
+            <div class="flow-step" data-step="2"><strong>Hermes 看 backend。</strong>如果是 local，就在宿主执行；如果是 Docker，就创建/复用容器；如果是 Modal/Daytona，就连接云沙箱。</div>
+            <div class="flow-step" data-step="3"><strong>决定文件可见性。</strong>Docker 不 mount 时看不到宿主项目；打开 bind mount 后，宿主项目在容器里变成 <code class="inline">/workspace</code>。</div>
+            <div class="flow-step" data-step="4"><strong>agent 执行工具。</strong>read/search/patch/terminal 都围绕同一个 backend 的路径工作。</div>
+            <div class="flow-step" data-step="5"><strong>改动产生。</strong>local 是直接改宿主；bind mount 是通过容器视图改宿主；云沙箱是改远端环境，需要 clone/upload/sync/push 才能回到外部。</div>
+            <div class="flow-step" data-step="6"><strong>清理或保留。</strong>临时容器可以销毁；持久云沙箱可以休眠；宿主项目改动用 git diff / commit 管理。</div>
+          </div>
+
+          <pre><code>Isolation mental model
+
+Terminal Backend = where commands run
+
+local:
+  isolation: weak
+  files: host files
+  meaning: fast, but agent can affect host directly
+
+docker without bind mount:
+  isolation: stronger
+  files: container files
+  meaning: safer, but project changes do not automatically come back
+
+docker with bind mount:
+  isolation: medium
+  files: host project exposed as /workspace
+  meaning: dependencies/processes isolated, project files intentionally shared
+
+modal/daytona:
+  isolation: remote cloud sandbox
+  files: remote sandbox filesystem
+  meaning: good for long-running, remote, parallel, RL/benchmark tasks</code></pre>
+
+          <div class="callout"><strong>为什么这对 agent 特别重要：</strong>普通程序员知道自己在敲什么命令，但 agent 会自动试错、装依赖、跑脚本、改很多文件。沙箱的价值就是给这种自动化行为加边界：允许它干活，但不要让它无限制碰宿主机、污染环境、破坏别的任务。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/tools/terminal_tool.py</code>、<code class="inline">/root/hermes/tools/environments/docker.py</code>、<code class="inline">/root/hermes/tools/environments/base.py:765-767</code>、<code class="inline">/root/hermes/cli-config.yaml.example:160-198</code></div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
