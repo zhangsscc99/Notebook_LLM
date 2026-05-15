@@ -965,13 +965,14 @@
         <details class="toc-group" id="hermesAgenticRlTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent Agentic RL</span>
-            <span class="toc-count">4 sections</span>
+            <span class="toc-count">5 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-agentic-rl-overview">01 · Hermes Agent 的 agentic RL：skills 外层 vs 训练内层</a>
             <a href="#hermes-skills-vs-agentic-rl">02 · skills vs agentic RL：优势对比与瓶颈弥补</a>
             <a href="#hermes-rl-weight-mechanics">03 · Hermes agentic RL：权重怎么改、LoRA 加哪、训练后怎么变成模型 API</a>
             <a href="#hermes-skills-mechanism">04 · Hermes Agent 的 skills 是怎么做的：如何自发展新 skills、如何管理</a>
+            <a href="#hermes-skill-creation-details">05 · Hermes Agent 具体怎么创建新 skills：五次工具调用、判断逻辑、生成细节</a>
           </div>
         </details>
         <details class="toc-group" id="hermesWorkflowTocGroup" open>
@@ -3188,6 +3189,155 @@ user task
 
           <div class="callout">最准确的理解是：<strong>Hermes 的 skills 是外层 agentic learning，不是内层 agentic RL。</strong> 它不通过 reward 改 LoRA 或 base model 权重，而是通过持续改写 procedural memory，让 agent 的运行时上下文越来越像“经过项目经验训练过”。</div>
           <div class="refs">参考：<code class="inline">/root/hermes/README.md</code>、<code class="inline">/root/hermes/agent/prompt_builder.py</code>、<code class="inline">/root/hermes/tools/skills_tool.py</code>、<code class="inline">/root/hermes/tools/skill_manager_tool.py</code>、<code class="inline">/root/hermes/tools/skill_usage.py</code>、<code class="inline">/root/hermes/agent/skill_commands.py</code>、<code class="inline">/root/hermes/agent/curator.py</code></div>
+        </section>
+
+
+        <section class="section reveal" id="hermes-skill-creation-details">
+          <div class="section-header"><div class="index">H5</div><h2>Hermes Agent 具体怎么创建新 skills：五次工具调用、判断逻辑、生成细节</h2></div>
+          <p>这里最容易误解的一点是：<strong>Hermes 不是在代码里写了一个简单的 <code class="inline">if tool_call_count &gt; 5: create_skill()</code></strong>。它有两套机制叠在一起：一套是<strong>前台模型被 prompt/schema 引导，自己判断要不要调用 <code class="inline">skill_manage</code></strong>；另一套是<strong>后台 self-improvement review 根据运行轮次触发，复盘整段对话后更新 skill 库</strong>。</p>
+          <div class="callout"><strong>准确说：</strong>“5+ calls”主要是写在 prompt / tool schema 里的启发式规则，告诉模型什么情况值得沉淀 skill；真正代码里的自动触发计数是 <code class="inline">_iters_since_skill</code>，默认按 <code class="inline">skills.creation_nudge_interval = 10</code> 个模型循环触发后台复盘，而且它数的是 agent loop iteration，不是严格的单个工具调用数。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 执行任务时，Hermes 怎么“知道”用了多少工具</h3>
+              <p>每次模型返回工具调用时，OpenAI-style 消息里会有 <code class="inline">assistant_message.tool_calls</code>。Hermes 会把这条 assistant message 追加到 <code class="inline">messages</code>，然后逐个执行工具，再把每个结果作为 <code class="inline">role=&quot;tool&quot;</code> 的消息追加回去。</p>
+              <pre><code>assistant message
+  tool_calls: [read_file, rg, terminal, edit_file, terminal]
+
+Hermes runtime
+  -> append assistant(tool_calls)
+  -> execute each tool call
+  -> append tool result messages
+  -> next model call sees the transcript</code></pre>
+              <p>所以“用了多少工具”并不是凭空猜的：工具调用历史就在对话 transcript 里。模型本身也能看到前面出现过哪些 <code class="inline">tool_calls</code> 和 tool results。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. “大于五次”到底是谁判断的</h3>
+              <p>有两层判断：</p>
+              <ul>
+                <li><strong>前台判断：</strong><code class="inline">SKILLS_GUIDANCE</code> 明确写着：完成复杂任务、5+ tool calls、修复棘手错误、发现非平凡 workflow 后，用 <code class="inline">skill_manage</code> 保存方法。这里主要是模型根据 transcript 自己判断。</li>
+                <li><strong>工具 schema 判断：</strong><code class="inline">SKILL_MANAGE_SCHEMA</code> 的 description 也写着：complex task succeeded (5+ calls)、errors overcome、user-corrected approach worked 等情况可以 create。</li>
+                <li><strong>后台触发：</strong>代码里还有 <code class="inline">_iters_since_skill</code>，每轮模型 API loop 递增，达到 <code class="inline">skills.creation_nudge_interval</code> 后启动后台 skill review。</li>
+              </ul>
+              <p>所以不要把“5+ calls”理解成硬编码阈值。它更像写给模型的<strong>判断标准</strong>：任务已经不是一两步临时回答，而是有可复用流程了。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 代码里的自动计数实际数什么</h3>
+              <p>在 <code class="inline">run_agent.py</code> 的主循环里，每次准备调用模型前会执行：</p>
+              <pre><code>if self._skill_nudge_interval &gt; 0 and "skill_manage" in self.valid_tool_names:
+    self._iters_since_skill += 1</code></pre>
+              <p>默认 <code class="inline">_skill_nudge_interval = 10</code>，也可以通过 <code class="inline">skills.creation_nudge_interval</code> 配置。任务结束时如果：</p>
+              <pre><code>_iters_since_skill &gt;= _skill_nudge_interval
+and "skill_manage" in valid_tool_names</code></pre>
+              <p>就会触发后台 review。注意：这里数的是<strong>模型循环轮次 / agent iteration</strong>，不是严格意义上的“工具调用个数”。一次 iteration 里可以有多个 tool calls，也可能没有工具调用。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 什么时候计数会清零</h3>
+              <p>只要当前 agent 真正调用了 <code class="inline">skill_manage</code>，Hermes 就会把 <code class="inline">_iters_since_skill</code> 清零。原因很简单：既然已经做过 skill 创建或更新，就不需要马上再 nudging 一次。</p>
+              <pre><code>if function_name == "skill_manage":
+    self._iters_since_skill = 0</code></pre>
+              <p>所以它的实际语义更像：<strong>距离上一次 skill 更新已经跑了多少 agent loop</strong>，而不是“本任务精确执行了多少个工具”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 形成 skill 的内容从哪里来</h3>
+              <p>skill 不是由某个固定模板自动抽取字段生成的，而是由模型读完整对话后综合出来。它能看到：</p>
+              <ul>
+                <li>用户原始目标是什么。</li>
+                <li>执行过程中用了哪些工具。</li>
+                <li>哪些命令成功、哪些失败。</li>
+                <li>失败后怎么修正。</li>
+                <li>最后哪条路径验证成功。</li>
+                <li>用户纠正了哪些风格、流程或输出要求。</li>
+              </ul>
+              <p>然后模型把这些压缩成一个可复用的 <code class="inline">SKILL.md</code>：触发条件、步骤、命令、坑点、验证方式。也就是说，形成 skill 的核心是<strong>LLM 复盘总结 + 结构化写文件</strong>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 创建 skill 的真实落盘流程</h3>
+              <p>当前台 agent 或后台 review agent 决定创建 skill 时，会调用：</p>
+              <pre><code>skill_manage(
+  action="create",
+  name="class-level-skill-name",
+  category="optional-category",
+  content="---\nname: ...\ndescription: ...\n---\n\n# ..."
+)</code></pre>
+              <p><code class="inline">skill_manager_tool.py</code> 收到后做这些事：</p>
+              <ol>
+                <li>校验 name 是否安全：小写、数字、点、下划线、短横线。</li>
+                <li>校验 category 是否安全。</li>
+                <li>校验 <code class="inline">SKILL.md</code> frontmatter，必须有 <code class="inline">name</code> 和 <code class="inline">description</code>。</li>
+                <li>检查内容大小，避免过大。</li>
+                <li>检查是否已有同名 skill。</li>
+                <li>创建 <code class="inline">~/.hermes/skills/&lt;name&gt;/</code> 或 <code class="inline">~/.hermes/skills/&lt;category&gt;/&lt;name&gt;/</code>。</li>
+                <li>用 atomic write 写入 <code class="inline">SKILL.md</code>。</li>
+                <li>可选执行安全扫描。</li>
+                <li>清空 skills prompt cache，让后续 prompt 能看到新 skill。</li>
+              </ol>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. 后台 review 是怎么工作的</h3>
+              <p>当主任务已经给用户返回最终答案后，Hermes 才启动后台 self-improvement review，避免抢占用户任务上下文。它会 fork 一个新的 <code class="inline">AIAgent</code>，只启用 <code class="inline">memory</code> 和 <code class="inline">skills</code> toolset，然后把刚才的 <code class="inline">messages_snapshot</code> 作为历史，让 review agent 复盘：</p>
+              <pre><code>main agent finishes response
+  -> if skill nudge trigger fired
+  -> _spawn_background_review(messages_snapshot, review_skills=True)
+  -> review agent reads transcript
+  -> skills_list / skill_view 查现有 skill
+  -> skill_manage patch/create/write_file
+  -> user only sees compact summary</code></pre>
+              <p>这层不是训练模型，而是一个“复盘代理”在任务结束后整理经验，直接写入共享的 skill 存储。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 新 skill 为什么要求 class-level</h3>
+              <p>后台 review prompt 明确要求优先更新“当前加载过的 skill”或“已有 umbrella skill”，最后才创建新 skill，而且新 skill 必须是 class-level，不应该叫 <code class="inline">fix-error-123-today</code> 这种一次性名字。</p>
+              <p>原因是如果每个会话都创建一个窄 skill，skill 库会变成垃圾堆；正确做法是把一次任务的细节归到一个更大的能力类别里，比如：</p>
+              <ul>
+                <li><code class="inline">vercel-deployment-debugging</code></li>
+                <li><code class="inline">python-package-release</code></li>
+                <li><code class="inline">frontend-responsive-layout-fixes</code></li>
+                <li><code class="inline">agent-sandbox-integration</code></li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="A">前台：system prompt 和 tool schema 持续提醒模型，复杂任务 / 5+ calls / 难错 / 新 workflow 要考虑写 skill。</div>
+            <div class="flow-step" data-step="B">运行中：每次工具调用都进入 transcript；模型能看到自己做过什么、失败过什么、成功路径是什么。</div>
+            <div class="flow-step" data-step="C">如果模型当场判断值得沉淀，就直接调用 <code class="inline">skill_manage(create/patch)</code>。</div>
+            <div class="flow-step" data-step="D">如果前台没写，后台 <code class="inline">_iters_since_skill</code> 达到阈值后启动 review agent 复盘。</div>
+            <div class="flow-step" data-step="E">review agent 优先 patch 现有 skill；没有合适 umbrella 才 create 新 class-level skill。</div>
+            <div class="flow-step" data-step="F">skill_manage 校验、落盘、清 cache、记录 provenance / usage，下一次 prompt 里就能被发现和加载。</div>
+          </div>
+
+          <pre><code>不要理解成：
+  if tool_call_count &gt; 5:
+      create_skill()
+
+更准确是：
+  prompt/schema 给模型一个规则：
+    复杂任务、5+ calls、难错、新 workflow => 应考虑沉淀 skill
+
+  runtime 给系统一个后台触发器：
+    每个 agent loop: _iters_since_skill += 1
+    如果达到 skills.creation_nudge_interval 默认 10:
+        任务结束后 fork review agent
+        review agent 复盘 transcript
+        skill_manage(patch/create/write_file)
+
+  skill_manage 负责真实写文件：
+    validate name/frontmatter/size
+    mkdir ~/.hermes/skills/...
+    atomic write SKILL.md
+    clear skills prompt cache
+    update usage/provenance</code></pre>
+
+          <div class="callout">所以 Hermes 创建新 skills 的本质是：<strong>不是硬规则自动抽取，而是 prompt 触发的 LLM 经验复盘 + runtime 的后台复盘触发器 + skill_manage 的安全落盘工具。</strong> “5+ tool calls”是判断任务复杂度的启发式信号；真正生成 skill 内容的是模型对这次任务轨迹的总结。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/run_agent.py</code>（<code class="inline">_iters_since_skill</code>、<code class="inline">_spawn_background_review</code>、<code class="inline">_SKILL_REVIEW_PROMPT</code>）、<code class="inline">/root/hermes/agent/prompt_builder.py</code>（<code class="inline">SKILLS_GUIDANCE</code>、skills mandatory prompt）、<code class="inline">/root/hermes/tools/skill_manager_tool.py</code>（<code class="inline">skill_manage</code>、<code class="inline">_create_skill</code>、<code class="inline">SKILL_MANAGE_SCHEMA</code>）、<code class="inline">/root/hermes/tools/skill_provenance.py</code>、<code class="inline">/root/hermes/tools/skill_usage.py</code></div>
         </section>
 
         <section class="section reveal" id="hermes-workflow-linear">
