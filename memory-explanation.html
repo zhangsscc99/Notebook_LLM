@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">7 sections</span>
+            <span class="toc-count">8 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -932,6 +932,7 @@
             <a href="#claude-workflow-5">05 · 子代理与后台任务</a>
             <a href="#claude-workflow-6">06 · Coordinator 多 worker 编排</a>
             <a href="#claude-workflow-7">07 · LangGraph 复刻编排</a>
+            <a href="#claude-workflow-8-query-ts">08 · 详解 query.ts 主循环文件</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -4749,6 +4750,185 @@ app = graph.compile(checkpointer=checkpointer)</code></pre>
 
           <div class="callout">设计原则：LangGraph 负责“可控状态机”，LLM 只负责“决策下一步”。把权限、并发、子代理、压缩、恢复都放进显式节点，不要藏在 prompt 里；这样才接近 Claude Code 那种可恢复、可审计、可并行、可人工接管的工作流编排。</div>
           <div class="refs">参考：LangGraph 官方文档的 <code class="inline">StateGraph</code>、checkpoint/persistence、human-in-the-loop interrupt、Command/Send、多代理 supervisor/swarm 设计；对照本地 Claude Code 源码 <code class="inline">src/query.ts</code>、<code class="inline">src/services/tools/toolOrchestration.ts</code>、<code class="inline">src/tools/AgentTool/runAgent.ts</code>、<code class="inline">src/coordinator/coordinatorMode.ts</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-8-query-ts">
+          <div class="section-header"><div class="index">C8</div><h2>详解 Claude Code 的 query.ts 主循环文件</h2></div>
+          <p><code class="inline">src/query.ts</code> 是 Claude Code 最核心的 agent runtime 文件。它不是 UI 层，也不是单个工具实现，而是<strong>把消息上下文、模型流式调用、tool_use 解析、工具执行、压缩恢复、stop hook、附件注入、下一轮递归</strong>串起来的主循环。</p>
+          <div class="callout"><strong>一句话：</strong><code class="inline">query.ts</code> 的核心是一个 <code class="inline">async generator + while(true)</code> 状态机：每轮把消息整理成可发给 Claude 的上下文，调用模型流式产出；如果没有工具调用就收尾返回，如果有工具调用就执行工具、把 tool_result 追加进 messages，然后更新 state 进入下一轮。</div>
+
+          <pre><code>query(params)
+  -> queryLoop(params)
+      while true:
+        1. 从 State 取 messages / toolUseContext / compact 状态
+        2. 构造 messagesForQuery
+        3. 执行 tool-result budget / snip / microcompact / context collapse / autocompact
+        4. deps.callModel(...) 流式调用 Claude
+        5. 收集 assistantMessages 和 toolUseBlocks
+        6. 如果没有 tool_use: stop hooks / token budget / completed
+        7. 如果有 tool_use: runTools 或 StreamingToolExecutor
+        8. 注入 attachments / memory / skills / queued commands
+        9. state.messages = old + assistant + tool_results
+       10. continue 下一轮</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. query() 是 async generator，不是普通函数</h3>
+              <p><code class="inline">query()</code> 返回的是 <code class="inline">AsyncGenerator</code>。这意味着它一边运行一边 <code class="inline">yield</code> 事件：stream start、assistant message、tool result、attachment、tombstone、tool summary 等。外层 <code class="inline">QueryEngine</code> / SDK / UI 不是等它全部结束才拿结果，而是边跑边消费这些事件。</p>
+              <p><code class="inline">query()</code> 自己只是薄包装：创建 <code class="inline">consumedCommandUuids</code>，把真正工作交给 <code class="inline">queryLoop()</code>，正常结束后通知 command lifecycle completed。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. State 是主循环的内存寄存器</h3>
+              <p><code class="inline">State</code> 保存跨轮状态：<code class="inline">messages</code>、<code class="inline">toolUseContext</code>、auto compact 状态、max output recovery 次数、是否尝试过 reactive compact、pending tool summary、stop hook 状态、turnCount、上一轮 transition。</p>
+              <p>每个 <code class="inline">continue</code> 分支不会到处改散变量，而是构造一个新的 <code class="inline">state = next</code>。这让主循环看起来像一个显式状态机：不同异常/恢复路径只是把 state 改成不同 transition，然后回到 while 顶部。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 每轮开始先做上下文整理</h3>
+              <p>主循环不是直接把全量历史塞给模型。它先取 <code class="inline">getMessagesAfterCompactBoundary(messages)</code>，再按顺序处理几类上下文压力：</p>
+              <ul>
+                <li><strong>tool result budget：</strong>大工具结果可能被替换成引用，避免单条 tool result 过大。</li>
+                <li><strong>snip compact：</strong>按 feature flag 裁剪历史。</li>
+                <li><strong>microcompact：</strong>更小粒度地压缩或编辑缓存。</li>
+                <li><strong>context collapse：</strong>把可折叠上下文投影成更短视图。</li>
+                <li><strong>autocompact：</strong>真正超上下文风险时生成 summary messages。</li>
+              </ul>
+              <p>所以 query loop 的第一职责其实是<strong>维持模型可继续推理的上下文窗口</strong>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. callModel 是模型流式输出入口</h3>
+              <p>整理完上下文后，它调用 <code class="inline">deps.callModel(...)</code>。传进去的不只是 messages，还有 system prompt、thinkingConfig、tools、abort signal、当前模型、fallbackModel、MCP tools、agent definitions、taskBudget、queryTracking 等。</p>
+              <p>模型返回是流式的：每来一个 message 就处理一次。如果是 assistant message，就扫描 content 里的 <code class="inline">tool_use</code> block，追加到 <code class="inline">toolUseBlocks</code>，并把 <code class="inline">needsFollowUp</code> 标成 true。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 为什么不用 stop_reason 判断是否有工具</h3>
+              <p>源码注释明确说 <code class="inline">stop_reason === 'tool_use'</code> 不可靠。所以主循环真正的退出信号不是 stop_reason，而是：<strong>流式过程中有没有看到 tool_use block</strong>。</p>
+              <pre><code>const toolUseBlocks: ToolUseBlock[] = []
+let needsFollowUp = false
+
+if assistant content has tool_use:
+  toolUseBlocks.push(...)
+  needsFollowUp = true
+
+if !needsFollowUp:
+  finish current turn
+else:
+  execute tools and continue</code></pre>
+              <p>这是理解 Claude Code agent loop 的关键：它按内容块判断下一步，不依赖 provider 的 stop_reason 字段。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. StreamingToolExecutor：边生成边执行工具</h3>
+              <p>如果 <code class="inline">streamingToolExecution</code> gate 打开，query loop 会创建 <code class="inline">StreamingToolExecutor</code>。当流式 assistant message 中刚出现 tool_use block，它就可以 <code class="inline">addTool()</code>，并在模型还没完全结束时收集已完成结果。</p>
+              <p>这能降低延迟：比如模型连续生成多个只读工具调用，系统不必等整段 assistant 输出结束才开始执行。关闭时则走传统 <code class="inline">runTools(toolUseBlocks, assistantMessages, ...)</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. 没有 tool_use 时怎么收尾</h3>
+              <p>如果 <code class="inline">needsFollowUp</code> 为 false，说明模型已经给出了最终回答或 API 错误。此时主循环会依次处理：</p>
+              <ul>
+                <li>prompt too long / media too large 的 reactive compact 恢复。</li>
+                <li>max_output_tokens 的升级重试或续写恢复。</li>
+                <li>API error 时跳过 stop hooks，避免错误循环。</li>
+                <li><code class="inline">handleStopHooks()</code>，如果 hook 阻止继续或返回 blocking error，就停止或带着错误继续一轮。</li>
+                <li>token budget continuation：如果预算策略要求继续，就注入 meta user message 再跑一轮。</li>
+                <li>最终 <code class="inline">return { reason: 'completed' }</code>。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 有 tool_use 时怎么执行工具</h3>
+              <p>如果有 tool_use，query loop 进入工具执行段。它选择：</p>
+              <pre><code>const toolUpdates = streamingToolExecutor
+  ? streamingToolExecutor.getRemainingResults()
+  : runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)</code></pre>
+              <p>每个工具 update 可能包含 <code class="inline">message</code> 和 <code class="inline">newContext</code>。message 会被 yield 给外层，同时用 <code class="inline">normalizeMessagesForAPI()</code> 转成 API 需要的 user/tool_result 形态，加入 <code class="inline">toolResults</code>。newContext 则更新 <code class="inline">toolUseContext</code>，例如工具执行后改变 readFileState、权限状态、MCP/tool 状态等。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>9. 工具后为什么还要注入 attachments</h3>
+              <p>工具执行完后，Claude Code 还会把一些“非模型直接请求但对下一轮有用”的信息作为 attachment 放进下一轮上下文：</p>
+              <ul>
+                <li>queued commands / task notifications：主线程只消费发给主线程的，subagent 只消费发给自己的。</li>
+                <li>memory prefetch：如果后台 memory 检索已经完成，就注入相关 memory attachment。</li>
+                <li>skill discovery prefetch：如果发现相关 skill，就注入 skill attachment。</li>
+                <li>file change attachment：记录 edited_text_file 这类文件变化。</li>
+              </ul>
+              <p>这层设计说明 query loop 不只是“模型→工具→模型”，它还负责把运行时事件合并成下一轮可见上下文。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>10. 下一轮递归其实是更新 state 后 continue</h3>
+              <p>源码里有 <code class="inline">queryCheckpoint('query_recursive_call')</code>，但不是函数递归调用自己，而是构造新的 State：</p>
+              <pre><code>state = {
+  messages: [...messagesForQuery, ...assistantMessages, ...toolResults],
+  toolUseContext: toolUseContextWithQueryTracking,
+  turnCount: nextTurnCount,
+  transition: { reason: 'next_turn' },
+  ...recoveryState
+}</code></pre>
+              <p>然后回到 <code class="inline">while(true)</code> 顶部。也就是说，“递归”在工程上是<strong>状态机循环</strong>，不是调用栈递归。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>11. query.ts 处理了哪些异常恢复</h3>
+              <p>这个文件很长，主要因为它把大量生产级恢复路径放进主循环：</p>
+              <ul>
+                <li><strong>模型 fallback：</strong>流式中触发 fallback 时 tombstone 掉孤儿 assistant messages，丢弃旧工具结果，切 fallback model 重试。</li>
+                <li><strong>prompt too long：</strong>先尝试 context collapse drain，再 reactive compact；仍失败才把错误暴露出去。</li>
+                <li><strong>max_output_tokens：</strong>先尝试提高 max output token，再最多做几次 resume continuation。</li>
+                <li><strong>abort：</strong>如果用户中断，要为已经发出的 tool_use 生成缺失 tool_result 或 interruption message，避免 API 消息结构不闭合。</li>
+                <li><strong>maxTurns：</strong>超过最大轮数时返回 max_turns，并发出 attachment。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>12. query.ts 和 QueryEngine 的边界</h3>
+              <p><code class="inline">QueryEngine</code> 更像“会话外壳”：接收用户输入、初始化工具/MCP/skills/permissions、维护 transcript 和 SDK 输出。<code class="inline">query.ts</code> 更像“单次 agent turn 的发动机”：拿到已经准备好的 params 后，负责跑到 completed / aborted / max_turns / prompt_too_long 等 terminal reason。</p>
+              <p>所以读源码时不要把它们混在一起：<strong>QueryEngine 管生命周期，query.ts 管模型-工具闭环。</strong></p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">入口：<code class="inline">query(params)</code> 创建 command lifecycle 跟踪，然后委托给 <code class="inline">queryLoop()</code>。</div>
+            <div class="flow-step" data-step="2">状态：<code class="inline">State</code> 保存 messages、toolUseContext、压缩/恢复/turn 计数。</div>
+            <div class="flow-step" data-step="3">上下文：从 compact boundary 后取消息，做 tool result budget、snip、microcompact、collapse、autocompact。</div>
+            <div class="flow-step" data-step="4">模型：<code class="inline">deps.callModel()</code> 流式产出 assistant messages，发现 tool_use 就收集。</div>
+            <div class="flow-step" data-step="5">分叉：没有 tool_use 就 stop hooks / token budget / completed；有 tool_use 就执行工具。</div>
+            <div class="flow-step" data-step="6">工具：StreamingToolExecutor 或 runTools 执行，结果转成 user tool_result。</div>
+            <div class="flow-step" data-step="7">补充上下文：注入 queued commands、memory prefetch、skill discovery、file change attachment。</div>
+            <div class="flow-step" data-step="8">继续：更新 state.messages 和 turnCount，回到 while 顶部。</div>
+          </div>
+
+          <pre><code>最小心智模型：
+
+messages/state
+  -> prepare context window
+  -> call Claude with tools
+  -> stream assistant blocks
+  -> if no tool_use:
+       stop hooks / recovery / completed
+     else:
+       execute tool_use
+       normalize tool_result as user message
+       inject runtime attachments
+       update state
+       loop again
+
+query.ts 的本质：
+  production-grade ReAct loop
+  + streaming events
+  + context compaction
+  + tool orchestration handoff
+  + recovery state machine
+  + attachment/memory/skill injection
+  + terminal reason return</code></pre>
+
+          <div class="callout">最重要的结论：<strong>Claude Code 的 query.ts 不是“调用模型的函数”，而是完整的 agent 主循环状态机。</strong> 它把模型输出的 tool_use 当成控制流，把工具结果当成下一轮 user message，把压缩、恢复、hook、中断、附件注入都纳入同一个 while loop，这就是 Claude Code 工作流编排的核心。</div>
+          <div class="refs">参考：<code class="inline">/root/OpenClaw/src/claude_code_source/claude-code-source-code-main/src/query.ts:203-239</code>（State 与 query 包装）、<code class="inline">query.ts:241-307</code>（queryLoop 初始化）、<code class="inline">query.ts:365-549</code>（上下文整理与 compact）、<code class="inline">query.ts:650-864</code>（模型流式调用与 tool_use 收集）、<code class="inline">query.ts:1062-1357</code>（无工具时收尾/恢复/stop hooks）、<code class="inline">query.ts:1380-1728</code>（工具执行、附件注入、更新 state 进入下一轮）。</div>
         </section>
       </main>
     </div>
