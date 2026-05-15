@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">11 sections</span>
+            <span class="toc-count">17 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -936,6 +936,12 @@
             <a href="#claude-workflow-9-planner-files">09 · Claude Code planner 层涉及哪些文件：路径清单与概括解读</a>
             <a href="#claude-workflow-10-parent-child-agent-tool-control">10 · Claude Code 父 agent 如何通过工具调用控制子 agent：AgentTool 通信机制</a>
             <a href="#claude-workflow-11-multi-agent-mechanism">11 · Claude Code 多 agent 机制：Team、Teammate、Mailbox、TaskList 与 Backend</a>
+            <a href="#claude-workflow-12-core-design-goals">12 · Claude Code 中 Agent 工作流编排的核心设计目标是什么</a>
+            <a href="#claude-workflow-13-state-machine">13 · Claude Code Agent 的工作流状态机包含哪几种核心状态，状态如何流转</a>
+            <a href="#claude-workflow-14-task-lifecycle">14 · Claude Code 完整任务执行生命周期：按执行顺序拆解每一个环节</a>
+            <a href="#claude-workflow-15-orchestration-vs-planning">15 · 工作流编排和广义 agent 任务规划的核心差异是什么</a>
+            <a href="#claude-workflow-16-execution-modes">16 · Claude Code 支持哪几种工作流执行模式，各自适用场景是什么</a>
+            <a href="#claude-workflow-17-io-spec-carriers">17 · Claude Code 工作流输入输出规范：核心数据载体有哪些</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -5359,6 +5365,136 @@ Teammate runtime
 
           <div class="callout">最短总结：<strong>Claude Code 多 agent 机制不是“开 N 个模型一起聊天”，而是一个工程化团队系统。</strong> Team file 负责身份注册，Mailbox 负责异步消息，TaskList 负责工作拆分，Backend 负责执行承载，Permission/Plan/Shutdown 负责安全边界和生命周期。</div>
           <div class="refs">参考文件：<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>、<code class="inline">src/tools/TeamCreateTool/prompt.ts</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>、<code class="inline">src/tools/shared/spawnMultiAgent.ts</code>、<code class="inline">src/utils/swarm/backends/registry.ts</code>、<code class="inline">src/utils/swarm/backends/TmuxBackend.ts</code>、<code class="inline">src/utils/swarm/backends/InProcessBackend.ts</code>、<code class="inline">src/utils/swarm/spawnInProcess.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>、<code class="inline">src/tasks/InProcessTeammateTask/InProcessTeammateTask.tsx</code>、<code class="inline">src/utils/teammateMailbox.ts</code>、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>、<code class="inline">src/tools/TaskCreateTool/*</code>、<code class="inline">src/tools/TaskListTool/*</code>、<code class="inline">src/tools/TaskUpdateTool/*</code>、<code class="inline">src/tools/TeamDeleteTool/*</code>、<code class="inline">src/utils/messages.ts</code>。</div>
+        </section>
+        <section class="section reveal" id="claude-workflow-12-core-design-goals">
+          <div class="section-header"><div class="index">C12</div><h2>Claude Code 中 Agent 工作流编排的核心设计目标是什么？</h2></div>
+          <p>Claude Code 的 Agent 工作流编排目标，不是把任务写成固定 DAG，而是把自然语言任务稳定地转成一个可恢复、可审计、可控权限、可长时间运行的 <strong>模型-工具闭环</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>LLM 负责判断“下一步做什么”，运行时负责“怎么安全、稳定、可追踪地执行这一步，并把结果闭环回模型”。</div>
+          <div class="grid-2">
+            <article class="mini-card"><h3>1. 统一主循环</h3><p><code class="inline">query.ts</code> 承载主 agent、subagent、teammate 的核心循环：准备上下文 → 调模型 → 收 tool_use → 执行工具 → 回填 tool_result → 下一轮。</p></article>
+            <article class="mini-card"><h3>2. 工具调用即控制流</h3><p>模型不能直接改文件或启动 agent，只能输出 <code class="inline">tool_use</code>。运行时用 schema、权限、工具接口和 result mapping 把文本意图变成确定动作。</p></article>
+            <article class="mini-card"><h3>3. 长任务可恢复</h3><p>通过 transcript、compact、microcompact、tool result budget、max output token recovery、max turns，让长任务在上下文膨胀或中途失败后仍可继续。</p></article>
+            <article class="mini-card"><h3>4. 安全边界可控</h3><p>敏感工具经过 <code class="inline">canUseTool</code>、permission mode、plan mode、worktree isolation；子 agent 和 team 不是绕过权限，而是把权限做成运行时协议。</p></article>
+            <article class="mini-card"><h3>5. 多入口复用</h3><p>REPL、print/headless、SDK、background task、AgentTool、team swarm 都复用同一套 query/tool/task 机制，只是外层入口和输出格式不同。</p></article>
+            <article class="mini-card"><h3>6. 多 agent 工具化</h3><p><code class="inline">AgentTool</code>、<code class="inline">TeamCreate</code>、<code class="inline">SendMessage</code>、TaskList 都是工具/任务系统的一部分，多 agent 是统一协议上的扩展。</p></article>
+          </div>
+          <pre><code>设计目标：
+LLM 负责策略选择
+Runtime 负责确定性执行：schema 校验、权限判断、工具执行、结果规范化、transcript、compact、错误恢复、多 agent 调度</code></pre>
+          <div class="refs">参考文件：<code class="inline">src/query.ts</code>、<code class="inline">src/QueryEngine.ts</code>、<code class="inline">src/Tool.ts</code>、<code class="inline">src/tools.ts</code>、<code class="inline">src/hooks/useCanUseTool.tsx</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-13-state-machine">
+          <div class="section-header"><div class="index">C13</div><h2>Claude Code Agent 的工作流状态机包含哪几种核心状态？状态如何流转？</h2></div>
+          <p>源码里没有一个显式 <code class="inline">WorkflowState</code> enum，但 <code class="inline">query.ts</code> 的 <code class="inline">State</code> 和 <code class="inline">while(true)</code> 就是实际状态机。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">Input Accepted：用户输入、队列 prompt、task notification 被接收。</div>
+            <div class="flow-step" data-step="2">Context Build：取 compact boundary 后消息，做 snip、microcompact、collapse、autocompact。</div>
+            <div class="flow-step" data-step="3">Model Streaming：调用 <code class="inline">deps.callModel()</code>，收 assistant text/thinking/tool_use。</div>
+            <div class="flow-step" data-step="4">Tool Decision：有 tool_use 就执行工具；没有 tool_use 就进入收尾。</div>
+            <div class="flow-step" data-step="5">Tool Execution：用 <code class="inline">StreamingToolExecutor</code> 或 <code class="inline">runTools()</code> 执行工具。</div>
+            <div class="flow-step" data-step="6">Attachment Injection：注入 queued commands、task notifications、memory、skills、file-change attachments。</div>
+            <div class="flow-step" data-step="7">Continue：把 assistantMessages + toolResults 写回 state，turnCount++，回到 Context Build。</div>
+            <div class="flow-step" data-step="8">Terminal：completed、max_turns、aborted、prompt_too_long、hook_stopped 等终止。</div>
+          </div>
+          <div class="grid-2">
+            <article class="mini-card"><h3>State 保存什么</h3><p><code class="inline">messages</code>、<code class="inline">toolUseContext</code>、compact tracking、max output token recovery、stop hook 状态、turnCount、pending tool summary、transition reason。</p></article>
+            <article class="mini-card"><h3>状态怎么跳</h3><p>不是 switch enum，而是构造 <code class="inline">next: State</code> 后 <code class="inline">continue</code>；终止时 <code class="inline">return { reason: ... }</code>。</p></article>
+          </div>
+          <pre><code>START -> CONTEXT_PREPARE -> MODEL_STREAMING
+  -> has tool_use ? TOOL_EXECUTION -> ATTACHMENTS -> UPDATE_STATE -> CONTEXT_PREPARE
+  -> no tool_use ? STOP_HOOKS / RECOVERY -> COMPLETED
+
+边界分支：prompt_too_long、max_output_tokens、aborted_streaming、aborted_tools、max_turns、hook_stopped</code></pre>
+          <div class="refs">参考文件：<code class="inline">src/query.ts:204-230</code>、<code class="inline">src/query.ts:241-565</code>、<code class="inline">src/query.ts:650-875</code>、<code class="inline">src/query.ts:1060-1730</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-14-task-lifecycle">
+          <div class="section-header"><div class="index">C14</div><h2>简述 Claude Code 完整的任务执行生命周期，按执行顺序拆解每一个环节。</h2></div>
+          <p>完整生命周期分两层：外层 <code class="inline">QueryEngine</code> 接收任务并管理会话；内层 <code class="inline">query.ts</code> 反复跑模型-工具循环直到完成或中断。</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">接收输入：REPL / SDK / print / queued command 把 prompt 交给 submitMessage 或 ask。</div>
+            <div class="flow-step" data-step="2">处理输入：<code class="inline">processUserInput()</code> 解析 slash command、图片、paste、attachment、allowed tools、model override。</div>
+            <div class="flow-step" data-step="3">写入消息与 transcript：用户消息进入 <code class="inline">mutableMessages</code>，并尽早记录，保证可 resume。</div>
+            <div class="flow-step" data-step="4">准备系统环境：加载 system prompt、userContext、systemContext、tools、MCP、agents、skills、plugins、permission context。</div>
+            <div class="flow-step" data-step="5">进入 query：构造 <code class="inline">QueryParams</code>，调用 <code class="inline">query({...})</code>。</div>
+            <div class="flow-step" data-step="6">整理上下文：compact/snip/microcompact/collapse，拼接 system prompt。</div>
+            <div class="flow-step" data-step="7">调用模型：流式产出 assistant text/thinking/tool_use。</div>
+            <div class="flow-step" data-step="8">执行工具：权限检查、工具执行、生成 tool_result。</div>
+            <div class="flow-step" data-step="9">注入运行时上下文：queued command、task notification、memory、skill discovery、edited file attachment。</div>
+            <div class="flow-step" data-step="10">下一轮或收尾：有工具结果就继续；无工具就 stop hooks、budget/recovery 检查后完成。</div>
+            <div class="flow-step" data-step="11">输出结果：QueryEngine 把内部 Message 标准化成 SDKMessage / UI 消息 / result。</div>
+            <div class="flow-step" data-step="12">持久化清理：写 transcript、flush session storage、累计 usage/cost、更新 read file cache。</div>
+          </div>
+          <pre><code>Prompt -> processUserInput -> mutableMessages/transcript -> system/tools/MCP/agents/skills -> query()
+  -> context prepare -> call model -> tool_use -> run tools -> tool_result/attachments -> loop or terminal
+  -> QueryEngine normalize -> SDK/UI result -> transcript/cache/usage 收尾</code></pre>
+          <div class="refs">参考文件：<code class="inline">src/QueryEngine.ts:209-1178</code>、<code class="inline">src/utils/processUserInput/processUserInput.ts</code>、<code class="inline">src/query.ts</code>、<code class="inline">src/utils/sessionStorage.ts</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-15-orchestration-vs-planning">
+          <div class="section-header"><div class="index">C15</div><h2>Claude Code 中，工作流编排和任务规划（广义 agent 任务规划）的核心差异是什么？</h2></div>
+          <p>这里的任务规划不是 Claude Code 的 Plan Mode，而是广义 agent planning：模型如何拆目标、排步骤、选择工具。它和工作流编排不是一回事。</p>
+          <div class="callout"><strong>核心区别：</strong>任务规划是模型层“想做什么、先做什么”；工作流编排是运行时层“如何安全执行、记录、恢复，并把结果送回模型”。</div>
+          <div class="grid-2">
+            <article class="mini-card"><h3>任务规划：认知策略层</h3><p>决定先读哪些文件、是否搜索、要不要派 Explore agent、先改哪层代码。它体现在模型文本、TodoWrite、TaskCreate、Agent prompt 和工具选择里。</p></article>
+            <article class="mini-card"><h3>工作流编排：执行控制层</h3><p>决定用户输入如何成 messages、工具如何过权限、tool_result 如何闭合、上下文太长怎么办、后台任务怎么通知、max turns 怎么终止。</p></article>
+            <article class="mini-card"><h3>规划可以变，编排必须稳</h3><p>每个任务的规划都可能不同；但工具协议、权限、transcript、compact、状态流转必须稳定，否则 agent 会不可恢复或不安全。</p></article>
+            <article class="mini-card"><h3>Claude Code 的选择</h3><p>不把所有任务强制塞进固定 planner-executor DAG，而是让模型动态规划，让运行时强制执行协议。</p></article>
+          </div>
+          <pre><code>Planning：目标拆解、步骤、策略、工具选择、子任务拆分
+Orchestration：schema、权限、工具执行、tool_result、attachments、compact、transcript、task notification</code></pre>
+          <div class="refs">参考文件：<code class="inline">src/query.ts</code>、<code class="inline">src/QueryEngine.ts</code>、<code class="inline">src/Tool.ts</code>、<code class="inline">src/tools/TodoWriteTool/TodoWriteTool.ts</code>、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-16-execution-modes">
+          <div class="section-header"><div class="index">C16</div><h2>Claude Code 支持哪几种工作流执行模式？各自的适用场景是什么？</h2></div>
+          <p>Claude Code 的执行模式可以按入口、agent 形态、权限/隔离和并发方式理解。底层大多复用同一套 query/tool/task 机制。</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>1. 交互式 REPL</h3><p>适合人机协作、看 diff、逐步确认、处理权限弹窗。入口：<code class="inline">src/screens/REPL.tsx</code>。</p></article>
+            <article class="mini-card"><h3>2. Headless / SDK / print</h3><p>适合脚本、CI、服务端集成、非交互自动化。入口：<code class="inline">src/QueryEngine.ts</code>、<code class="inline">src/cli/print.ts</code>。</p></article>
+            <article class="mini-card"><h3>3. 单 agent ReAct 循环</h3><p>默认模式，适合大多数读代码、改代码、跑测试任务。核心：<code class="inline">src/query.ts</code>。</p></article>
+            <article class="mini-card"><h3>4. Plan-gated 模式</h3><p>适合复杂修改前先探索、写计划、审批后实现。核心是 permission mode + plan file + Enter/ExitPlanMode。</p></article>
+            <article class="mini-card"><h3>5. 同步 subagent</h3><p>父 agent 等子 agent 完成，结果直接作为 tool_result 返回。适合短研究、短规划、一次性检查。</p></article>
+            <article class="mini-card"><h3>6. 异步 background agent/task</h3><p>父 agent 启动后台任务后继续工作，后续通过 task notification 或 output file 获取结果。适合长搜索、长测试、并行探索。</p></article>
+            <article class="mini-card"><h3>7. Coordinator / Team swarm</h3><p>用 TeamCreate、Agent(name)、SendMessage、TaskList 组织多个 worker。适合大项目拆分和并行研发。</p></article>
+            <article class="mini-card"><h3>8. Worktree / remote isolation</h3><p>让 agent 在独立工作区或远端环境里跑，适合实验性修改、多 agent 并行和避免污染主工作区。</p></article>
+          </div>
+          <pre><code>小任务 -> 单 agent
+复杂需审批 -> plan-gated
+短研究 -> 同步 subagent
+长任务/并行探索 -> background agent
+大项目并行 -> Team swarm
+担心污染工作区 -> worktree isolation
+CI/API -> Headless/SDK</code></pre>
+          <div class="refs">参考文件：<code class="inline">src/screens/REPL.tsx</code>、<code class="inline">src/QueryEngine.ts</code>、<code class="inline">src/cli/print.ts</code>、<code class="inline">src/query.ts</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>、<code class="inline">src/tasks/LocalAgentTask/LocalAgentTask.tsx</code>、<code class="inline">src/coordinator/coordinatorMode.ts</code>、<code class="inline">src/tools/TeamCreateTool/*</code>、<code class="inline">src/utils/worktree.ts</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-17-io-spec-carriers">
+          <div class="section-header"><div class="index">C17</div><h2>简述 Claude Code 工作流的输入输出规范，核心数据载体有哪些？</h2></div>
+          <p>Claude Code 不是简单 string in / string out。它是多层数据载体：用户输入变成 Message，工具调用变成 tool_use/tool_result，运行时事件变成 Attachment/Progress/StreamEvent，最终由 QueryEngine 规范化成 SDKMessage 或 UI 输出。</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>1. 用户输入</h3><p><code class="inline">prompt: string | ContentBlockParam[]</code>，可包含文本、图片、paste、IDE selection、slash command。</p></article>
+            <article class="mini-card"><h3>2. Message[]</h3><p>内部核心载体，包括 user、assistant、system、attachment、progress、tombstone、tool_use_summary，是 query、transcript、resume、compact 的共同基础。</p></article>
+            <article class="mini-card"><h3>3. 工具协议</h3><p>assistant 里有 <code class="inline">tool_use</code>，运行时必须回填对应 <code class="inline">tool_result</code>。工具定义 input schema、output schema、permission、render、result mapping。</p></article>
+            <article class="mini-card"><h3>4. ToolUseContext</h3><p>携带 messages、tools、MCP、permission context、abortController、readFileState、skill discovery、setAppState 等运行时能力。</p></article>
+            <article class="mini-card"><h3>5. 系统上下文</h3><p><code class="inline">systemPrompt</code>、<code class="inline">userContext</code>、<code class="inline">systemContext</code>、agent definitions、MCP tools、skills/plugins 决定模型看到什么和能调用什么。</p></article>
+            <article class="mini-card"><h3>6. Attachment / Task</h3><p>queued commands、task notification、memory prefetch、skill discovery、edited file attachment、task state、mailbox、output file 承载运行时和异步结果。</p></article>
+            <article class="mini-card"><h3>7. SDK 输出</h3><p>QueryEngine 输出 assistant、user replay、system compact/api_retry、stream_event、tool_use_summary、result success/error 等 SDKMessage。</p></article>
+            <article class="mini-card"><h3>8. 最终 result</h3><p>包含 result text、duration、turn count、stop_reason、session_id、cost、usage、modelUsage、permission_denials、structured_output、error subtype。</p></article>
+          </div>
+          <pre><code>User prompt / ContentBlockParam[]
+  -> processUserInput()
+  -> Message[]
+  -> query(QueryParams + ToolUseContext + Tools/MCP/Agents)
+  -> assistant tool_use
+  -> Tool.call()
+  -> user tool_result
+  -> Attachment / Progress / StreamEvent
+  -> QueryEngine normalize
+  -> SDKMessage / UI message / result</code></pre>
+          <div class="callout">关键规范：<strong>tool_use 必须和 tool_result 配对，Message[] 必须可持久化和恢复，Attachment 必须能规范化成模型可读上下文，最终 result 必须能被 SDK/CLI 稳定消费。</strong></div>
+          <div class="refs">参考文件：<code class="inline">src/types/message.ts</code>、<code class="inline">src/Tool.ts</code>、<code class="inline">src/QueryEngine.ts</code>、<code class="inline">src/query.ts</code>、<code class="inline">src/utils/processUserInput/processUserInput.ts</code>、<code class="inline">src/utils/messages.ts</code>、<code class="inline">src/utils/attachments.ts</code>、<code class="inline">src/tasks/types.ts</code>。</div>
         </section>
 
 
