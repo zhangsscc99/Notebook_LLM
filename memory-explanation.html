@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">8 sections</span>
+            <span class="toc-count">9 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -933,6 +933,7 @@
             <a href="#claude-workflow-6">06 · Coordinator 多 worker 编排</a>
             <a href="#claude-workflow-7">07 · LangGraph 复刻编排</a>
             <a href="#claude-workflow-8-query-ts">08 · 详解 query.ts 主循环文件</a>
+            <a href="#claude-workflow-9-planner-files">09 · Claude Code planner 层涉及哪些文件：路径清单与概括解读</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -4929,6 +4930,150 @@ query.ts 的本质：
 
           <div class="callout">最重要的结论：<strong>Claude Code 的 query.ts 不是“调用模型的函数”，而是完整的 agent 主循环状态机。</strong> 它把模型输出的 tool_use 当成控制流，把工具结果当成下一轮 user message，把压缩、恢复、hook、中断、附件注入都纳入同一个 while loop，这就是 Claude Code 工作流编排的核心。</div>
           <div class="refs">参考：<code class="inline">/root/OpenClaw/src/claude_code_source/claude-code-source-code-main/src/query.ts:203-239</code>（State 与 query 包装）、<code class="inline">query.ts:241-307</code>（queryLoop 初始化）、<code class="inline">query.ts:365-549</code>（上下文整理与 compact）、<code class="inline">query.ts:650-864</code>（模型流式调用与 tool_use 收集）、<code class="inline">query.ts:1062-1357</code>（无工具时收尾/恢复/stop hooks）、<code class="inline">query.ts:1380-1728</code>（工具执行、附件注入、更新 state 进入下一轮）。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-9-planner-files">
+          <div class="section-header"><div class="index">C9</div><h2>Claude Code planner 层涉及哪些文件：路径清单与概括解读</h2></div>
+          <p>Claude Code 里没有一个单独叫 <code class="inline">Planner.ts</code> 的总控文件。它的 planner 层是<strong>Plan Mode 机制</strong>：通过权限模式、plan 文件、Enter/ExitPlanMode 工具、plan mode system attachment、Explore/Plan 子代理、用户审批和恢复逻辑共同组成。</p>
+          <div class="callout"><strong>核心理解：</strong>Claude Code 的 planner 层不是“模型先输出一段计划文本”这么简单，而是一个工程化状态：进入 <code class="inline">mode='plan'</code> 后，模型只能读代码和写 plan 文件；最终通过 <code class="inline">ExitPlanMode</code> 把 plan 提交给用户或 team lead 审批，审批通过后才恢复实现模式。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 入口命令：/plan</h3>
+              <p><code class="inline">src/commands/plan/index.ts</code></p>
+              <p>注册本地 JSX 命令 <code class="inline">/plan</code>，描述是“Enable plan mode or view the current session plan”。它只是命令声明，真正逻辑 lazy-load 到 <code class="inline">plan.tsx</code>。</p>
+              <p><code class="inline">src/commands/plan/plan.tsx</code></p>
+              <p>如果当前不是 plan mode，就调用 <code class="inline">prepareContextForPlanMode()</code>，再把 permission mode 切到 <code class="inline">plan</code>。如果已经在 plan mode，则读取当前 plan 文件并展示；<code class="inline">/plan open</code> 会用外部编辑器打开 plan 文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 进入计划模式：EnterPlanModeTool</h3>
+              <p><code class="inline">src/tools/EnterPlanModeTool/EnterPlanModeTool.ts</code></p>
+              <p>这是模型可以主动调用的“进入计划模式”工具。它会拒绝 agent 子上下文调用，只允许主线程进入 plan mode。调用后更新 <code class="inline">toolPermissionContext.mode = 'plan'</code>，并返回明确指令：现在应该探索代码、设计实现方案，不能写业务文件。</p>
+              <p><code class="inline">src/tools/EnterPlanModeTool/prompt.ts</code></p>
+              <p>定义什么时候该进入 plan mode：新功能、多种实现路径、架构决策、多文件修改、需求不清、用户偏好会影响实现等。也定义什么时候不该用：拼写修复、简单单函数、纯研究任务。</p>
+              <p><code class="inline">src/tools/EnterPlanModeTool/UI.tsx</code></p>
+              <p>负责终端 UI 展示：进入、拒绝或结果消息。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 退出计划模式：ExitPlanModeTool</h3>
+              <p><code class="inline">src/tools/ExitPlanModeTool/ExitPlanModeV2Tool.ts</code></p>
+              <p>这是 planner 层最关键的“闸门”。模型不能随口说“计划好了我开始写”，而要调用 <code class="inline">ExitPlanMode</code>。这个工具会读取 plan 文件，触发用户确认；如果是 teammate 且要求 plan approval，则把计划写入 team lead mailbox 等待审批。审批通过后，它把 mode 从 <code class="inline">plan</code> 恢复到进入 plan 前的模式。</p>
+              <p><code class="inline">src/tools/ExitPlanModeTool/prompt.ts</code></p>
+              <p>规定 ExitPlanMode 的使用边界：只在已经写好 plan 文件、准备让用户审批时调用；研究任务不要调用；不要用普通文本或 AskUserQuestion 去问“计划可以吗”，这正是 ExitPlanMode 的职责。</p>
+              <p><code class="inline">src/tools/ExitPlanModeTool/UI.tsx</code></p>
+              <p>负责显示“Exited plan mode”“Plan submitted for team lead approval”“Plan rejected”等 UI 状态，并展示 plan 文件路径。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. Plan 文件存储：utils/plans.ts</h3>
+              <p><code class="inline">src/utils/plans.ts</code></p>
+              <p>管理 plan 文件的生命周期。它为每个 session 生成一个 word slug，并把 plan 存到 plans directory。主会话路径类似 <code class="inline">&lt;slug&gt;.md</code>，子代理路径类似 <code class="inline">&lt;slug&gt;-agent-&lt;agentId&gt;.md</code>。</p>
+              <ul>
+                <li><code class="inline">getPlanSlug()</code>：为 session 生成 / 缓存 plan slug。</li>
+                <li><code class="inline">getPlansDirectory()</code>：决定 plan 文件目录，默认在 Claude config home 的 <code class="inline">plans</code> 下，也可由 settings 指定项目内目录。</li>
+                <li><code class="inline">getPlanFilePath()</code>：得到当前会话或 agent 的 plan 文件路径。</li>
+                <li><code class="inline">getPlan()</code>：读取 plan 内容。</li>
+                <li><code class="inline">copyPlanForResume()</code> / <code class="inline">copyPlanForFork()</code>：恢复或 fork 会话时保留 plan。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 权限模式：permissionSetup / bootstrap state</h3>
+              <p><code class="inline">src/utils/permissions/permissionSetup.ts</code></p>
+              <p>这里是 plan mode 的权限语义中心。<code class="inline">prepareContextForPlanMode()</code> 会把当前模式保存到 <code class="inline">prePlanMode</code>，这样退出计划模式时能恢复。它还处理“plan 期间是否沿用 auto mode 语义”，必要时会 strip / restore dangerous permissions。</p>
+              <p><code class="inline">src/bootstrap/state.ts</code></p>
+              <p>保存 session 级 plan 状态：<code class="inline">hasExitedPlanMode</code>、<code class="inline">needsPlanModeExitAttachment</code>、<code class="inline">planSlugCache</code>，并通过 <code class="inline">handlePlanModeTransition()</code> 在进入 / 退出 plan mode 时设置一次性 attachment 提示。</p>
+              <p><code class="inline">src/state/AppStateStore.ts</code></p>
+              <p>AppState 里定义 <code class="inline">initialMessage.allowedPrompts</code>、<code class="inline">pendingPlanVerification</code> 等 plan 相关状态；teammate 如果要求 plan approval，初始 permission mode 会直接是 <code class="inline">plan</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. Plan Mode 指令注入：utils/messages.ts</h3>
+              <p><code class="inline">src/utils/messages.ts</code></p>
+              <p>这是 planner 层的 prompt 编排核心之一。它把 <code class="inline">plan_mode</code> attachment 转成系统提醒，告诉模型：</p>
+              <ul>
+                <li>当前是 plan mode，除 plan 文件外不能编辑任何文件。</li>
+                <li>只能做只读探索、代码阅读、搜索、提问和计划编写。</li>
+                <li>计划文件路径是什么，是否已经存在。</li>
+                <li>默认 workflow 是 Phase 1 初步理解 → Phase 2 设计 → Phase 3 review → Phase 4 写最终 plan → Phase 5 调用 ExitPlanMode。</li>
+                <li>另一种 interview workflow 会要求边探索边更新 plan 文件，并用 AskUserQuestion 澄清。</li>
+              </ul>
+              <p>这层才是模型“像 planner 一样工作”的主要 prompt 来源。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. Compact 后保留计划上下文</h3>
+              <p><code class="inline">src/services/compact/compact.ts</code></p>
+              <p>计划模式不能因为上下文压缩就丢失。这个文件里有：</p>
+              <ul>
+                <li><code class="inline">createPlanAttachmentIfNeeded()</code>：如果 plan 文件存在，压缩后继续把 plan 内容作为 attachment 保留。</li>
+                <li><code class="inline">createPlanModeAttachmentIfNeeded()</code>：如果当前仍在 plan mode，压缩后重新注入 plan mode 指令，避免模型忘记“只允许写 plan 文件”。</li>
+              </ul>
+              <p>这说明 planner 层不是一次性 prompt，而是和长上下文恢复机制绑定。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 工具注册和 agent 限制</h3>
+              <p><code class="inline">src/tools.ts</code></p>
+              <p>把 <code class="inline">ExitPlanModeV2Tool</code> 和 <code class="inline">EnterPlanModeTool</code> 加进基础工具池；如果 feature gate 打开，还可能加入 <code class="inline">VerifyPlanExecutionTool</code>。</p>
+              <p><code class="inline">src/constants/tools.ts</code></p>
+              <p>定义哪些工具在 agent / async agent 里被禁用。注释明确说 <code class="inline">ExitPlanModeTool</code> 是 main thread abstraction，普通 async agent 不能随便退出主线程 plan mode。</p>
+              <p><code class="inline">src/tools/AgentTool/agentToolUtils.ts</code></p>
+              <p>有一个例外：如果 agent 的 permissionMode 是 <code class="inline">plan</code>，允许 <code class="inline">ExitPlanMode</code>，用于 in-process teammates 这种需要 plan approval 的场景。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>9. Explore / Plan 内置子代理</h3>
+              <p><code class="inline">src/tools/AgentTool/builtInAgents.ts</code></p>
+              <p>根据 feature gate 注册内置 <code class="inline">Explore</code> 和 <code class="inline">Plan</code> agents。plan mode 指令会建议复杂任务先并行启动 Explore agent 搜代码，再启动 Plan agent 设计方案。</p>
+              <p><code class="inline">src/tools/AgentTool/built-in/exploreAgent.ts</code></p>
+              <p>定义只读搜索型子代理，禁止 Write/Edit/NotebookEdit/ExitPlanMode 等工具，目标是快速找文件、grep、读代码并报告发现。</p>
+              <p><code class="inline">src/tools/AgentTool/built-in/planAgent.ts</code></p>
+              <p>定义软件架构规划子代理，同样只读，输出实现步骤、关键文件、依赖顺序和 trade-off。它复用 Explore agent 的工具集合，但系统 prompt 强调“只能探索和规划，不能改文件”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>10. 外部 API / CLI 模式入口</h3>
+              <p><code class="inline">src/entrypoints/sdk/coreSchemas.ts</code></p>
+              <p>把 <code class="inline">PermissionModeSchema</code> 定义为包含 <code class="inline">'plan'</code>，说明 SDK / headless 入口也能设置 planning mode。</p>
+              <p><code class="inline">src/main.tsx</code></p>
+              <p>CLI 参数里有 <code class="inline">--plan-mode-required</code>；如果 agent swarm teammate 要求 plan approval，启动时 effective permission mode 会被设成 <code class="inline">plan</code>。</p>
+            </article>
+          </div>
+
+          <pre><code>Claude Code planner 层心智模型：
+
+入口
+  /plan command 或 EnterPlanMode tool
+    -> prepareContextForPlanMode()
+    -> toolPermissionContext.mode = 'plan'
+    -> 记录 prePlanMode，方便退出后恢复
+
+计划过程
+  messages.ts 注入 plan_mode instructions
+    -> 只读探索代码
+    -> 可写的唯一文件是 plan file
+    -> 可用 Explore / Plan agents 辅助搜索和设计
+    -> 必要时 AskUserQuestion 澄清
+    -> 把最终方案写入 plan markdown
+
+退出
+  ExitPlanMode tool
+    -> 读取 plan file
+    -> 用户 / team lead 审批
+    -> 审批通过后恢复 prePlanMode
+    -> tool_result 把 approved plan 带回模型
+    -> 模型开始真正实现
+
+持久化 / 恢复
+  utils/plans.ts 保存 plan 文件
+  compact.ts 在上下文压缩后重新注入 plan 和 plan_mode 约束
+  bootstrap/AppState 记录 session 级 plan 状态</code></pre>
+
+          <div class="callout">最短总结：<strong>Claude Code planner 层 = plan permission mode + plan file + Enter/ExitPlanMode tools + plan_mode attachment prompt + Explore/Plan agents + approval gate。</strong> 它不是单点 planner 函数，而是把“先计划、审批后执行”做成了运行时状态机。</div>
+          <div class="refs">参考文件：<code class="inline">src/commands/plan/index.ts</code>、<code class="inline">src/commands/plan/plan.tsx</code>、<code class="inline">src/tools/EnterPlanModeTool/*</code>、<code class="inline">src/tools/ExitPlanModeTool/*</code>、<code class="inline">src/utils/plans.ts</code>、<code class="inline">src/utils/permissions/permissionSetup.ts</code>、<code class="inline">src/bootstrap/state.ts</code>、<code class="inline">src/state/AppStateStore.ts</code>、<code class="inline">src/utils/messages.ts</code>、<code class="inline">src/services/compact/compact.ts</code>、<code class="inline">src/tools.ts</code>、<code class="inline">src/constants/tools.ts</code>、<code class="inline">src/tools/AgentTool/builtInAgents.ts</code>、<code class="inline">src/tools/AgentTool/built-in/exploreAgent.ts</code>、<code class="inline">src/tools/AgentTool/built-in/planAgent.ts</code>、<code class="inline">src/entrypoints/sdk/coreSchemas.ts</code>、<code class="inline">src/main.tsx</code>。</div>
         </section>
       </main>
     </div>
