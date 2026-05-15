@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">9 sections</span>
+            <span class="toc-count">10 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -934,6 +934,7 @@
             <a href="#claude-workflow-7">07 · LangGraph 复刻编排</a>
             <a href="#claude-workflow-8-query-ts">08 · 详解 query.ts 主循环文件</a>
             <a href="#claude-workflow-9-planner-files">09 · Claude Code planner 层涉及哪些文件：路径清单与概括解读</a>
+            <a href="#claude-workflow-10-parent-child-agent-tool-control">10 · Claude Code 父 agent 如何通过工具调用控制子 agent：AgentTool 通信机制</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -5075,6 +5076,147 @@ query.ts 的本质：
           <div class="callout">最短总结：<strong>Claude Code planner 层 = plan permission mode + plan file + Enter/ExitPlanMode tools + plan_mode attachment prompt + Explore/Plan agents + approval gate。</strong> 它不是单点 planner 函数，而是把“先计划、审批后执行”做成了运行时状态机。</div>
           <div class="refs">参考文件：<code class="inline">src/commands/plan/index.ts</code>、<code class="inline">src/commands/plan/plan.tsx</code>、<code class="inline">src/tools/EnterPlanModeTool/*</code>、<code class="inline">src/tools/ExitPlanModeTool/*</code>、<code class="inline">src/utils/plans.ts</code>、<code class="inline">src/utils/permissions/permissionSetup.ts</code>、<code class="inline">src/bootstrap/state.ts</code>、<code class="inline">src/state/AppStateStore.ts</code>、<code class="inline">src/utils/messages.ts</code>、<code class="inline">src/services/compact/compact.ts</code>、<code class="inline">src/tools.ts</code>、<code class="inline">src/constants/tools.ts</code>、<code class="inline">src/tools/AgentTool/builtInAgents.ts</code>、<code class="inline">src/tools/AgentTool/built-in/exploreAgent.ts</code>、<code class="inline">src/tools/AgentTool/built-in/planAgent.ts</code>、<code class="inline">src/entrypoints/sdk/coreSchemas.ts</code>、<code class="inline">src/main.tsx</code>。</div>
         </section>
+
+        <section class="section reveal" id="claude-workflow-10-parent-child-agent-tool-control">
+          <div class="section-header"><div class="index">C10</div><h2>Claude Code 父 agent 如何通过工具调用控制子 agent：AgentTool 通信机制</h2></div>
+          <p>你的理解基本是对的：Claude Code 里的父 agent 控制子 agent，核心不是两个模型进程私下共享状态，而是<strong>父 agent 输出一个工具调用</strong>，运行时执行这个工具调用，再把子 agent 的结果以 <code class="inline">tool_result</code> 或 <code class="inline">&lt;task-notification&gt;</code> 的形式塞回父 agent 的下一轮上下文。</p>
+          <div class="callout"><strong>一句话：</strong>父 agent 通过 <code class="inline">Agent(...)</code> 工具创建子 agent；子 agent 本质上又跑了一套自己的 <code class="inline">query()</code> 主循环；同步时结果直接变成父 agent 的工具结果，异步时先返回 <code class="inline">agentId</code>，完成后通过任务通知队列回到父 agent。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">父 agent 思考后输出 <code class="inline">tool_use: Agent({ prompt, subagent_type, model, run_in_background, ... })</code>。</div>
+            <div class="flow-step" data-step="2"><code class="inline">query.ts</code> 发现 assistant message 里有工具调用，进入工具执行分支。</div>
+            <div class="flow-step" data-step="3"><code class="inline">AgentTool.call()</code> 解析要启动哪类子 agent、用哪个模型、哪些工具、是否后台、是否 worktree 隔离。</div>
+            <div class="flow-step" data-step="4"><code class="inline">runAgent()</code> 构造子 agent 的 messages / system prompt / toolUseContext / permission / MCP / skills。</div>
+            <div class="flow-step" data-step="5">子 agent 再次调用 <code class="inline">query({...})</code>，也就是独立跑一套模型-工具循环。</div>
+            <div class="flow-step" data-step="6">同步模式：子 agent 跑完后，最终回答直接作为父 agent 的 <code class="inline">Agent</code> 工具结果。</div>
+            <div class="flow-step" data-step="7">异步模式：父 agent 先收到 <code class="inline">async_launched</code>，后续完成时收到 <code class="inline">&lt;task-notification&gt;</code>。</div>
+            <div class="flow-step" data-step="8">父 agent 看到结果 / 通知后，再决定继续调用 <code class="inline">SendMessage</code>、读 output file、停止任务，或综合多个子 agent 结果。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 父 agent 控制子 agent 的“遥控器”是什么</h3>
+              <p>遥控器就是 <code class="inline">src/tools/AgentTool/AgentTool.tsx</code> 里的 <code class="inline">AgentTool</code>。它暴露给模型的参数就是父 agent 能控制子 agent 的边界：</p>
+              <ul>
+                <li><code class="inline">description</code>：给 UI / 任务列表看的短描述。</li>
+                <li><code class="inline">prompt</code>：真正交给子 agent 的任务说明。</li>
+                <li><code class="inline">subagent_type</code>：选择 Explore、Plan、general-purpose、worker 或自定义 agent。</li>
+                <li><code class="inline">model</code>：给子 agent 指定 sonnet / opus / haiku 覆盖模型。</li>
+                <li><code class="inline">run_in_background</code>：决定同步等待还是后台执行。</li>
+                <li><code class="inline">name</code> / <code class="inline">team_name</code> / <code class="inline">mode</code>：多 agent / teammate 场景下让子 agent 可被寻址、可要求 plan approval。</li>
+                <li><code class="inline">isolation</code> / <code class="inline">cwd</code>：决定子 agent 在哪个工作目录或 worktree 里运行。</li>
+              </ul>
+              <p>所以父 agent 不是通过函数参数直接改子 agent 的隐藏状态，而是通过一次标准工具调用，把“角色、任务、权限、工作区、是否后台”这些控制量交给运行时。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 子 agent 不是普通函数，而是另一套 query 主循环</h3>
+              <p><code class="inline">src/tools/AgentTool/runAgent.ts</code> 是关键。它会创建 <code class="inline">agentId</code>，准备子 agent 自己的初始消息、系统 prompt、用户上下文、系统上下文、工具上下文和工具池，然后再次调用：</p>
+              <pre><code>for await (const message of query({
+  messages: initialMessages,
+  systemPrompt: agentSystemPrompt,
+  userContext: resolvedUserContext,
+  systemContext: resolvedSystemContext,
+  canUseTool,
+  toolUseContext: agentToolUseContext,
+  querySource,
+  maxTurns: maxTurns ?? agentDefinition.maxTurns,
+})) { ... }</code></pre>
+              <p>这意味着子 agent 可以自己读文件、grep、调用工具、压缩上下文、产生 transcript。它不是父 agent 的一个普通 callback，而是“父 agent 通过工具启动的另一个 agent runtime”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 同步子 agent：结果直接回到父 agent 的 tool_result</h3>
+              <p>如果不是后台模式，父 agent 的 <code class="inline">Agent</code> 工具调用会阻塞到子 agent 完成。完成后 <code class="inline">AgentTool.mapToolResultToToolResultBlockParam()</code> 把子 agent 的最终回答包装成父 agent 可见的 <code class="inline">tool_result</code>。</p>
+              <p>父 agent 下一轮看到的不是子 agent 的完整内心过程，而是子 agent 汇总后的输出，以及可能附带的 <code class="inline">agentId</code>、token、tool use 数、耗时等元信息。内置的一次性 Explore / Plan agent 为了省 token，甚至可能省略继续通信用的 trailer。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 异步子 agent：先返回 agentId，完成后再通知</h3>
+              <p>如果 <code class="inline">run_in_background=true</code>、agent 定义强制 background、coordinator mode、fork 模式等条件触发异步，<code class="inline">AgentTool</code> 会注册一个 <code class="inline">LocalAgentTask</code>，启动后台生命周期，然后立刻给父 agent 返回：</p>
+              <pre><code>Async agent launched successfully.
+agentId: ...
+output_file: ...</code></pre>
+              <p>这个 <code class="inline">agentId</code> 是后续控制句柄。子 agent 完成后，<code class="inline">LocalAgentTask.enqueueAgentNotification()</code> 会把下面这种 XML-ish 通知放进队列：</p>
+              <pre><code>&lt;task-notification&gt;
+  &lt;task-id&gt;agentId&lt;/task-id&gt;
+  &lt;output-file&gt;...&lt;/output-file&gt;
+  &lt;status&gt;completed&lt;/status&gt;
+  &lt;summary&gt;...&lt;/summary&gt;
+  &lt;result&gt;...&lt;/result&gt;
+&lt;/task-notification&gt;</code></pre>
+              <p>然后 <code class="inline">query.ts</code> 在工具执行后的队列注入阶段把这个通知变成父 agent 上下文里的 user-role attachment。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 父 agent 如何“继续指挥”后台子 agent</h3>
+              <p>继续控制主要靠几个任务/通信工具：</p>
+              <ul>
+                <li><code class="inline">SendMessage</code>：给正在运行的 in-process 子 agent 排队消息；如果子 agent 停了但有 transcript，可能恢复它并把新消息作为继续任务。</li>
+                <li><code class="inline">TaskOutput</code>：读取后台任务输出，不过源码 prompt 里已经标注更推荐直接 <code class="inline">Read</code> 返回的 output file。</li>
+                <li><code class="inline">TaskStop</code>：通过 task id 停止一个运行中的后台任务。</li>
+                <li><code class="inline">TaskGet</code>：读取 todo/task 系统里的任务状态。</li>
+              </ul>
+              <p>所以“父子通信像工具调用”这个观察是准确的：启动靠 <code class="inline">Agent</code>，继续靠 <code class="inline">SendMessage</code>，观察靠 output file / task notification，停止靠 <code class="inline">TaskStop</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. Coordinator 模式把这种模式制度化了</h3>
+              <p><code class="inline">src/coordinator/coordinatorMode.ts</code> 的系统提示明确要求 coordinator 用 <code class="inline">Agent({ description, subagent_type: "worker", prompt })</code> 启动 worker。多个 <code class="inline">Agent</code> 工具调用放在同一个 assistant message 里，就能并行 fan-out 多个 worker。</p>
+              <p>worker 的结果不是直接变成普通聊天文本，而是以 <code class="inline">&lt;task-notification&gt;</code> 形式回来。coordinator 再根据通知里的 <code class="inline">task-id</code> 用 <code class="inline">SendMessage</code> 继续推进某个 worker，或者用 <code class="inline">TaskStop</code> 停止它。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. 权限和隔离：父 agent 不是把全部能力裸交出去</h3>
+              <p><code class="inline">src/tools/AgentTool/agentToolUtils.ts</code> 负责解析子 agent 的工具池和禁用列表。Explore / Plan 这种只读 agent 会禁用 Edit、Write、NotebookEdit 等写操作；异步 agent 还有自己的 allowlist；permission mode 也可以被 agent 定义覆盖。</p>
+              <p>如果选择 <code class="inline">isolation: "worktree"</code>，<code class="inline">AgentTool</code> 会创建临时 git worktree，让子 agent 在独立工作区操作。这样父 agent 可以把任务派出去，但不必让所有子 agent 都在同一个工作目录里互相踩文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 一个具体例子</h3>
+              <p>假设父 agent 要重构登录模块，它可能在同一轮里发出两个工具调用：</p>
+              <pre><code>Agent({
+  description: "Research auth flow",
+  subagent_type: "Explore",
+  prompt: "只读搜索 src/auth、src/api/login，列出登录链路和关键文件。",
+  run_in_background: true
+})
+
+Agent({
+  description: "Plan auth refactor",
+  subagent_type: "Plan",
+  prompt: "基于当前代码结构，设计登录模块拆分方案，不要改文件。",
+  run_in_background: true
+})</code></pre>
+              <p>运行时启动两个子 agent。父 agent 先得到两个 <code class="inline">agentId</code>，继续做不冲突的工作；等通知回来后，父 agent 综合 Explore 的文件发现和 Plan 的方案，再决定自己实现、继续发消息给某个子 agent，或停止某个方向。</p>
+            </article>
+          </div>
+
+          <pre><code>父子 agent 通信心智模型：
+
+父 agent 的模型输出
+  -> Agent tool_use
+  -> AgentTool.call()
+       解析 subagent_type / model / prompt / isolation / background
+       注册任务或 foreground agent
+       调 runAgent()
+  -> runAgent()
+       创建 agentId
+       组装子 agent prompt / tools / permission / MCP / skills
+       再跑一套 query() 主循环
+  -> 子 agent 完成
+       同步：返回 completed tool_result 给父 agent
+       异步：先返回 async_launched；完成后 enqueue task-notification
+  -> 父 agent 下一轮看到结果
+       用 SendMessage 继续
+       用 Read/TaskOutput 观察
+       用 TaskStop 停止
+       或综合结果继续主任务</code></pre>
+
+          <div class="callout">最关键的边界：<strong>父 agent 控制的是子 agent 的输入、角色、工具环境、运行方式和后续消息，不是直接读取或操纵子 agent 的隐藏推理。</strong> Claude Code 把父子 agent 通信统一成“模型发工具调用、运行时执行、结果回填上下文”的协议，这也是它能做多 worker 编排、后台任务和 coordinator 模式的基础。</div>
+          <div class="refs">参考文件：<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>（Agent 工具 schema、同步/异步分支、tool_result 映射）、<code class="inline">src/tools/AgentTool/runAgent.ts</code>（子 agent 再次调用 query 主循环）、<code class="inline">src/tools/AgentTool/agentToolUtils.ts</code>（工具过滤、异步生命周期、结果收尾）、<code class="inline">src/tasks/LocalAgentTask/LocalAgentTask.tsx</code>（后台 agent task 和 task-notification）、<code class="inline">src/query.ts</code>（工具执行后注入 queued task notification）、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>（向子 agent / teammate 发送继续消息）、<code class="inline">src/tools/TaskStopTool/TaskStopTool.ts</code>、<code class="inline">src/tools/TaskOutputTool/TaskOutputTool.tsx</code>、<code class="inline">src/coordinator/coordinatorMode.ts</code>。</div>
+        </section>
+
       </main>
     </div>
 
