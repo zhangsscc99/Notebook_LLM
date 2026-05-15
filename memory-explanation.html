@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">10 sections</span>
+            <span class="toc-count">11 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -935,6 +935,7 @@
             <a href="#claude-workflow-8-query-ts">08 · 详解 query.ts 主循环文件</a>
             <a href="#claude-workflow-9-planner-files">09 · Claude Code planner 层涉及哪些文件：路径清单与概括解读</a>
             <a href="#claude-workflow-10-parent-child-agent-tool-control">10 · Claude Code 父 agent 如何通过工具调用控制子 agent：AgentTool 通信机制</a>
+            <a href="#claude-workflow-11-multi-agent-mechanism">11 · Claude Code 多 agent 机制：Team、Teammate、Mailbox、TaskList 与 Backend</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -5216,6 +5217,150 @@ Agent({
           <div class="callout">最关键的边界：<strong>父 agent 控制的是子 agent 的输入、角色、工具环境、运行方式和后续消息，不是直接读取或操纵子 agent 的隐藏推理。</strong> Claude Code 把父子 agent 通信统一成“模型发工具调用、运行时执行、结果回填上下文”的协议，这也是它能做多 worker 编排、后台任务和 coordinator 模式的基础。</div>
           <div class="refs">参考文件：<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>（Agent 工具 schema、同步/异步分支、tool_result 映射）、<code class="inline">src/tools/AgentTool/runAgent.ts</code>（子 agent 再次调用 query 主循环）、<code class="inline">src/tools/AgentTool/agentToolUtils.ts</code>（工具过滤、异步生命周期、结果收尾）、<code class="inline">src/tasks/LocalAgentTask/LocalAgentTask.tsx</code>（后台 agent task 和 task-notification）、<code class="inline">src/query.ts</code>（工具执行后注入 queued task notification）、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>（向子 agent / teammate 发送继续消息）、<code class="inline">src/tools/TaskStopTool/TaskStopTool.ts</code>、<code class="inline">src/tools/TaskOutputTool/TaskOutputTool.tsx</code>、<code class="inline">src/coordinator/coordinatorMode.ts</code>。</div>
         </section>
+
+        <section class="section reveal" id="claude-workflow-11-multi-agent-mechanism">
+          <div class="section-header"><div class="index">C11</div><h2>Claude Code 多 agent 机制：Team、Teammate、Mailbox、TaskList 与 Backend</h2></div>
+          <p>Claude Code 里的“多 agent”不是单一机制，而是两层东西叠在一起：一层是 <strong>AgentTool 子代理</strong>，用于一次性派发 Explore / Plan / general-purpose 等子任务；另一层是 <strong>Agent Swarms / Team Teammates</strong>，用于创建长期存在、可命名、可互相发消息、可共享任务列表的团队。</p>
+          <div class="callout"><strong>核心结论：</strong>Claude Code 的多 agent = <code class="inline">TeamCreate</code> 建团队 + <code class="inline">Agent(name, team_name, ...)</code> 生成 teammate + <code class="inline">SendMessage</code> 发消息 + <code class="inline">TaskCreate/TaskList/TaskUpdate</code> 分工 + mailbox 文件做异步通信 + tmux/iTerm2/in-process backend 承载执行。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">团队入口：父 agent 调用 <code class="inline">TeamCreate</code>，创建 team config 和对应 task list。</div>
+            <div class="flow-step" data-step="2">生成成员：父 agent 调用 <code class="inline">Agent({ name, team_name, prompt, subagent_type, mode })</code>。</div>
+            <div class="flow-step" data-step="3">分流判断：<code class="inline">AgentTool.call()</code> 发现有 <code class="inline">teamName && name</code>，不走普通 subagent，而走 <code class="inline">spawnTeammate()</code>。</div>
+            <div class="flow-step" data-step="4">后端选择：registry 选择 tmux、iTerm2 pane，或 in-process backend。</div>
+            <div class="flow-step" data-step="5">启动 teammate：写 team file，注册 AppState task，给 teammate 分配 <code class="inline">agentName@teamName</code> 身份。</div>
+            <div class="flow-step" data-step="6">初始任务：leader 把 prompt 写入 teammate 的 mailbox，teammate 读取后进入自己的 agent loop。</div>
+            <div class="flow-step" data-step="7">协作过程：成员通过 <code class="inline">SendMessage</code>、共享 task list、idle notification、permission request 互相协调。</div>
+            <div class="flow-step" data-step="8">收尾：leader 发送 shutdown_request，teammate 决定退出；最后 <code class="inline">TeamDelete</code> 清理团队资源。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 两种“多 agent”不要混</h3>
+              <p><strong>普通 subagent：</strong>父 agent 调 <code class="inline">Agent({ subagent_type, prompt })</code>，运行时启动一个子 <code class="inline">query()</code>，结果以 <code class="inline">tool_result</code> 或 <code class="inline">task-notification</code> 回来。它更像“派一个临时专家去做一件事”。</p>
+              <p><strong>Team teammate：</strong>父 agent 先有 team，再调 <code class="inline">Agent({ name, team_name, prompt })</code>。有 <code class="inline">name</code> 后，这个 agent 变成可寻址的长期成员，能收消息、发消息、查任务列表、进入 idle 等待下一轮任务。</p>
+              <p>源码分界点在 <code class="inline">AgentTool.tsx</code>：如果 <code class="inline">teamName && name</code> 成立，就调用 <code class="inline">spawnTeammate()</code>；否则才走普通 <code class="inline">runAgent()</code> 子代理路线。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. TeamCreate：团队是文件 + AppState + TaskList</h3>
+              <p><code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code> 创建团队。它会生成 team lead 的 deterministic id，写入 <code class="inline">~/.claude/teams/{team}/config.json</code>，并重置/创建对应任务目录 <code class="inline">~/.claude/tasks/{team}/</code>。</p>
+              <p>Team file 里有 <code class="inline">members</code> 数组，记录每个成员的 <code class="inline">name</code>、<code class="inline">agentId</code>、<code class="inline">agentType</code>、model、cwd、pane id、backendType 等。AppState 里的 <code class="inline">teamContext</code> 则让当前 leader 会话知道自己正在管理哪个 team。</p>
+              <p>这就是为什么源码里一直强调：通信和任务分配要用 teammate 的 <strong>name</strong>，不要直接用 UUID。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. spawnTeammate：Agent 工具变成“开新成员”</h3>
+              <p><code class="inline">src/tools/shared/spawnMultiAgent.ts</code> 是 teammate 创建核心。它会：</p>
+              <ul>
+                <li>给重复名字自动加后缀，如 <code class="inline">tester-2</code>。</li>
+                <li>用 <code class="inline">formatAgentId(name, teamName)</code> 形成 <code class="inline">name@team</code> 身份。</li>
+                <li>选择模型：支持继承 leader 模型，也支持 agent frontmatter/model 参数覆盖。</li>
+                <li>写 team file，把新成员追加到 <code class="inline">members</code>。</li>
+                <li>注册 task，让 UI 能显示 teammate 正在运行。</li>
+                <li>把初始 prompt 写入 teammate mailbox，而不是直接把 prompt 当 CLI 参数塞进去。</li>
+              </ul>
+              <p>所以 teammate 的第一轮输入，实际上是从邮箱里被读到的。这是多 agent 异步通信的关键。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. Backend：tmux / iTerm2 / in-process 三类承载方式</h3>
+              <p><code class="inline">src/utils/swarm/backends/registry.ts</code> 做 backend detection：</p>
+              <ul>
+                <li>在 tmux 里运行：优先用 tmux split pane。</li>
+                <li>在 iTerm2 且 it2 CLI 可用：用 iTerm2 native panes。</li>
+                <li>不在 tmux/iTerm2 但 tmux 可用：创建外部 <code class="inline">claude-swarm</code> session。</li>
+                <li>in-process backend：同一个 Node.js 进程内运行 teammate，用 AsyncLocalStorage 做身份隔离。</li>
+              </ul>
+              <p>pane backend 的价值是“每个 teammate 像独立 Claude Code 终端”；in-process backend 的价值是“不依赖外部终端，多 agent 都在同一进程里调度”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. Mailbox：多 agent 通信不是共享上下文，而是收发文件消息</h3>
+              <p><code class="inline">src/utils/teammateMailbox.ts</code> 实现文件邮箱。每个 teammate 有一个 inbox 文件，路径类似：</p>
+              <pre><code>~/.claude/teams/{team_name}/inboxes/{agent_name}.json</code></pre>
+              <p><code class="inline">writeToMailbox()</code> 写消息，并用 lockfile 防止多个 agent 同时写入时互相覆盖；<code class="inline">readMailbox()</code> 读取消息；<code class="inline">markMessageAsReadByIndex()</code> 把消息标记为已读。</p>
+              <p>消息注入到模型上下文时，会被格式化成：</p>
+              <pre><code>&lt;teammate-message teammate_id="researcher" summary="..."&gt;
+消息内容
+&lt;/teammate-message&gt;</code></pre>
+              <p>这说明多 agent 没有共享隐藏思维链，只有显式消息、共享任务文件和共享项目文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. SendMessage：统一的通信工具</h3>
+              <p><code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code> 是 leader 和 teammate 通信的主工具。普通文本消息必须带 <code class="inline">summary</code>，可以发给具体名字，也可以 <code class="inline">to: "*"</code> 广播。</p>
+              <p>它有几种路由：</p>
+              <ul>
+                <li>如果目标是 in-process local agent/task，就把消息塞进 <code class="inline">pendingUserMessages</code> 或尝试从 transcript 恢复。</li>
+                <li>如果是 team teammate，就写入对方 mailbox。</li>
+                <li>结构化消息用于 shutdown、plan approval 等控制流。</li>
+                <li>启用 UDS/bridge 时，还能跨 session 发纯文本消息。</li>
+              </ul>
+              <p>所以多 agent 的“对话”本质是工具调用触发的消息路由，而不是多个模型自动共享同一个聊天窗口。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. TaskList：团队协作靠任务板解耦</h3>
+              <p>Team 和 TaskList 是 1:1 的。<code class="inline">TeamCreate</code> 创建 team 时会创建对应 task list；<code class="inline">TaskCreate</code>、<code class="inline">TaskList</code>、<code class="inline">TaskUpdate</code>、<code class="inline">TaskGet</code> 让 leader 和 teammates 共享一块任务板。</p>
+              <p>in-process runner 里还有 <code class="inline">tryClaimNextTask()</code>：teammate idle 时会查看任务列表，找 pending、未分配、未被未完成依赖阻塞的任务，claim 后继续工作。</p>
+              <p>因此 Claude Code 的多 agent 编排不是只靠聊天，而是 <strong>消息 + 任务状态 + owner + blockedBy</strong> 组合成一个轻量工作流系统。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. in-process teammate：长期循环，不是一次性运行</h3>
+              <p><code class="inline">src/utils/swarm/inProcessRunner.ts</code> 的 <code class="inline">runInProcessTeammate()</code> 有一个 while loop。每轮它把当前 prompt 交给 <code class="inline">runAgent()</code>，也就是复用普通 agent loop；完成后不退出，而是标记 idle，发 idle notification，然后等待下一条 mailbox 消息、shutdown request 或可领取任务。</p>
+              <p>这和普通 background subagent 最大不同：普通 subagent 完成就结束；teammate 完成一轮后会“挂起等活”，类似团队里的长期 worker。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>9. 权限：teammate 不是绕过 leader 的安全边界</h3>
+              <p>in-process teammate 的工具权限通过 <code class="inline">createInProcessCanUseTool()</code> 接到 leader 的权限 UI。如果工具需要 ask，它会在 leader 侧显示带 worker badge 的确认对话；没有 UI bridge 时，fallback 到 mailbox permission request/response。</p>
+              <p>如果 teammate 是 <code class="inline">plan_mode_required</code>，启动参数会带 <code class="inline">--plan-mode-required</code> 或 in-process state 设成 plan。teammate 需要通过 plan approval 流程，由 team lead 审批后再进入实现。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>10. Shutdown / TeamDelete：收尾也协议化</h3>
+              <p>团队成员不是随便 kill。推荐流程是 leader 用 <code class="inline">SendMessage</code> 发结构化 <code class="inline">shutdown_request</code>；teammate 收到后由模型决定 approve/reject。in-process backend 会设置 <code class="inline">shutdownRequested</code>，pane backend 则依赖对应终端/进程通信。</p>
+              <p><code class="inline">TeamDelete</code> 会检查团队是否还有 active members。如果还有成员没退出，清理会失败，要求先优雅关闭 teammates。这样避免任务、邮箱和终端 pane 资源被半截清掉。</p>
+            </article>
+          </div>
+
+          <pre><code>Claude Code 多 agent 总心智模型：
+
+TeamCreate
+  -> ~/.claude/teams/{team}/config.json
+  -> ~/.claude/tasks/{team}/
+  -> AppState.teamContext
+
+Agent({ name, team_name, prompt, subagent_type })
+  -> AgentTool.call()
+  -> teamName && name ? spawnTeammate() : runAgent()
+  -> spawnTeammate()
+       生成 name@team agentId
+       选择 backend: tmux / iTerm2 / in-process
+       注册 task / 写 team file
+       prompt 写入 teammate mailbox
+
+Teammate runtime
+  -> 读取 mailbox / task list
+  -> runAgent() 跑一轮工作
+  -> SendMessage 给 leader 或其他 teammate
+  -> TaskUpdate 更新任务状态
+  -> idle notification
+  -> 等下一条消息、下一项任务或 shutdown_request
+
+通信边界
+  -> 不共享隐藏推理
+  -> 显式 mailbox 消息
+  -> 显式 task list 状态
+  -> 显式 permission / plan approval
+  -> 显式 shutdown 协议</code></pre>
+
+          <div class="callout">最短总结：<strong>Claude Code 多 agent 机制不是“开 N 个模型一起聊天”，而是一个工程化团队系统。</strong> Team file 负责身份注册，Mailbox 负责异步消息，TaskList 负责工作拆分，Backend 负责执行承载，Permission/Plan/Shutdown 负责安全边界和生命周期。</div>
+          <div class="refs">参考文件：<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>、<code class="inline">src/tools/TeamCreateTool/prompt.ts</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>、<code class="inline">src/tools/shared/spawnMultiAgent.ts</code>、<code class="inline">src/utils/swarm/backends/registry.ts</code>、<code class="inline">src/utils/swarm/backends/TmuxBackend.ts</code>、<code class="inline">src/utils/swarm/backends/InProcessBackend.ts</code>、<code class="inline">src/utils/swarm/spawnInProcess.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>、<code class="inline">src/tasks/InProcessTeammateTask/InProcessTeammateTask.tsx</code>、<code class="inline">src/utils/teammateMailbox.ts</code>、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>、<code class="inline">src/tools/TaskCreateTool/*</code>、<code class="inline">src/tools/TaskListTool/*</code>、<code class="inline">src/tools/TaskUpdateTool/*</code>、<code class="inline">src/tools/TeamDeleteTool/*</code>、<code class="inline">src/utils/messages.ts</code>。</div>
+        </section>
+
 
       </main>
     </div>
