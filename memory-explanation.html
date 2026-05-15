@@ -965,12 +965,13 @@
         <details class="toc-group" id="hermesAgenticRlTocGroup" open>
           <summary>
             <span class="toc-group-title">Hermes Agent Agentic RL</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">4 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hermes-agentic-rl-overview">01 · Hermes Agent 的 agentic RL：skills 外层 vs 训练内层</a>
             <a href="#hermes-skills-vs-agentic-rl">02 · skills vs agentic RL：优势对比与瓶颈弥补</a>
             <a href="#hermes-rl-weight-mechanics">03 · Hermes agentic RL：权重怎么改、LoRA 加哪、训练后怎么变成模型 API</a>
+            <a href="#hermes-skills-mechanism">04 · Hermes Agent 的 skills 是怎么做的：如何自发展新 skills、如何管理</a>
           </div>
         </details>
         <details class="toc-group" id="hermesWorkflowTocGroup" open>
@@ -3058,6 +3059,135 @@ self.current_sampling_client = self.service_client.create_sampling_client(model_
           <p>如果要把训练后的权重单独导出来，仓库还提供了下载脚本：它通过 <code class="inline">create_rest_client()</code> 和 <code class="inline">get_checkpoint_archive_url_from_tinker_path(...)</code>，把 <code class="inline">tinker://.../sampler_weights/final</code> 下载成归档文件。</p>
           <div class="callout">最准确的总结是：<strong>Hermes 的 agentic RL 不是自己手写 LoRA 注入和底层训练核，而是通过 Tinker 的 LoRA training client 来改 adapter 权重；再把更新后的 sampler client 用 FastAPI 封装成一个训练后模型 API。</strong></div>
           <div class="refs">参考：<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/trainer.py</code>、<code class="inline">/root/hermes/tinker-atropos/launch_training.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/config.py</code>、<code class="inline">/root/hermes/tinker-atropos/tinker_atropos/utils/download_weights.py</code>、<code class="inline">/root/hermes/tools/rl_training_tool.py</code></div>
+        </section>
+
+
+        <section class="section reveal" id="hermes-skills-mechanism">
+          <div class="section-header"><div class="index">H4</div><h2>Hermes Agent 的 skills 是怎么做的：如何自发展新 skills、如何管理</h2></div>
+          <p>Hermes 的 skills 不是“模型权重训练”，而是<strong>应用层的程序化经验系统</strong>：把一次任务里验证过的做法，沉淀成下次可加载的操作手册。它让 agent 形成一种外层学习闭环：<strong>做任务 → 发现套路 → 写成 skill → 下次先加载 skill → 如果 skill 过期就补丁更新</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>Hermes 的 skills 是 procedural memory（程序化记忆）。memory 记“事实 / 偏好 / 背景”，skills 记“某类任务应该怎么做、按什么步骤做、用哪些工具、避开什么坑”。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">agent 启动或构建 prompt 时，扫描 <code class="inline">~/.hermes/skills/</code> 和配置的 external skill dirs，只把 skill 名称、描述、分类放进上下文。</div>
+            <div class="flow-step" data-step="2">模型先根据任务判断哪些 skill 相关；如果相关，系统提示要求它必须调用 <code class="inline">skill_view(name)</code> 加载完整 skill。</div>
+            <div class="flow-step" data-step="3">执行任务时，skill 变成具体工作流、命令、工具顺序、约束和坑点清单，影响 agent 的下一步决策。</div>
+            <div class="flow-step" data-step="4">如果任务复杂、工具调用很多、修了一个难错、发现了可复用流程，agent 用 <code class="inline">skill_manage(action=&quot;create&quot;)</code> 新建 skill。</div>
+            <div class="flow-step" data-step="5">如果加载的 skill 错了、旧了、缺步骤，agent 直接用 <code class="inline">skill_manage(action=&quot;patch&quot;)</code> 修它，不等用户单独要求。</div>
+            <div class="flow-step" data-step="6">后台 curator 根据使用记录维护 agent-created skills：标记 stale、归档、合并、补丁，但只碰 agent 创建的 skill，不随便动 bundled / hub skills。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. skill 的物理形态是什么</h3>
+              <p>Hermes 的一个 skill 本质上是一个目录，主文件是 <code class="inline">SKILL.md</code>，旁边可以挂支持文件：</p>
+              <pre><code>~/.hermes/skills/
+  my-skill/
+    SKILL.md
+    references/
+    templates/
+    scripts/
+    assets/</code></pre>
+              <p><code class="inline">SKILL.md</code> 必须以 YAML frontmatter 开头，至少要有 <code class="inline">name</code> 和 <code class="inline">description</code>。后面的正文才是真正给 agent 看的操作流程、注意事项、命令模板和决策规则。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 为什么说它是 procedural memory</h3>
+              <p><code class="inline">skill_manager_tool.py</code> 里直接把 skills 定义成 procedural memory：它保存的是<strong>怎么做某类任务</strong>，不是泛泛的知识。比如：</p>
+              <ul>
+                <li>memory 适合记：用户喜欢中文解释、某项目用 pnpm、某 API key 在哪里配置。</li>
+                <li>skill 适合记：如何排查一个失败的部署、如何做代码审查、如何按项目规范新增一个功能。</li>
+              </ul>
+              <p>这也是 Hermes 外层“拟 agentic RL”的核心：不改模型参数，但会改运行时可调用的经验库。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. Hermes 怎么发现和加载 skills</h3>
+              <p>Hermes 不是把所有 skill 全量塞进上下文，那样会爆 token。它用了<strong>渐进式披露</strong>：</p>
+              <ul>
+                <li><code class="inline">skills_list</code> 只返回 name / description / category 等轻量元数据。</li>
+                <li>prompt builder 会把可用 skill 索引插入 system prompt，并要求模型先扫描。</li>
+                <li>如果某个 skill 相关，模型必须调用 <code class="inline">skill_view(name)</code> 读取完整内容。</li>
+                <li>如果还需要支持文件，再调用 <code class="inline">skill_view(name, file_path=&quot;references/xxx.md&quot;)</code>。</li>
+              </ul>
+              <p>所以它的上下文策略是：<strong>先给目录，不给全文；相关时再加载全文；需要时再加载附件</strong>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 怎么自己发展新 skills</h3>
+              <p>Hermes 在 system prompt 里明确给了触发规则：完成复杂任务、5 次以上工具调用、修复棘手错误、发现非平凡工作流后，要把方法保存成 skill。实际落盘动作由：</p>
+              <pre><code>skill_manage(action="create", name="...", content="...")</code></pre>
+              <p>完成。这个工具会创建目录、写入 <code class="inline">SKILL.md</code>，并校验名称、frontmatter、内容大小。也就是说，Hermes 的“自发展”不是神秘训练，而是模型在任务结束后把可复用经验写成结构化文件。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 怎么自我改进旧 skills</h3>
+              <p>如果 agent 加载了一个 skill，但执行时发现命令过期、步骤不完整、坑点漏了，prompt 明确要求它<strong>立刻 patch</strong>：</p>
+              <pre><code>skill_manage(
+  action="patch",
+  name="...",
+  old_string="旧内容",
+  new_string="新内容"
+)</code></pre>
+              <p>这就是 skill 层面的学习闭环：这次踩到的坑，不应该只在当前会话里解释一遍，而应该写回 skill，让下一次任务直接避开。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. Hermes 怎么管理这些 skills</h3>
+              <p>管理动作主要集中在 <code class="inline">skill_manage</code>：</p>
+              <ul>
+                <li><code class="inline">create</code>：创建新 skill。</li>
+                <li><code class="inline">edit</code>：整篇重写 <code class="inline">SKILL.md</code>。</li>
+                <li><code class="inline">patch</code>：对 <code class="inline">SKILL.md</code> 或支持文件做局部替换。</li>
+                <li><code class="inline">delete</code>：删除 / 归档用户 skill。</li>
+                <li><code class="inline">write_file</code>：写 <code class="inline">references/</code>、<code class="inline">templates/</code>、<code class="inline">scripts/</code>、<code class="inline">assets/</code> 里的支持文件。</li>
+                <li><code class="inline">remove_file</code>：删除支持文件。</li>
+              </ul>
+              <p>另外 <code class="inline">skill_commands.py</code> 会扫描 skill，把部分 skill 暴露成 slash command；调用后还会 bump usage，给 curator 后续维护用。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. curator 怎么维护 skill 库</h3>
+              <p><code class="inline">agent/curator.py</code> 是后台 skill 维护器。它不是每次都跑，而是按配置周期在 agent 空闲时做维护。它会读取 <code class="inline">~/.hermes/skills/.usage.json</code> 里的使用记录，判断哪些 agent-created skills 应该保留、补丁、合并、标记 stale 或归档。</p>
+              <ul>
+                <li>默认只维护 agent 创建的 skills。</li>
+                <li>bundled / hub-installed skills 受保护，不被 curator 随便覆盖。</li>
+                <li>不会自动不可恢复地删除；归档是 recoverable 的。</li>
+                <li>pinned skill 可以绕过自动归档 / 删除。</li>
+              </ul>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 安全和约束怎么做</h3>
+              <p>Hermes 对 agent 写 skill 做了几层约束：</p>
+              <ul>
+                <li>skill 名称必须 filesystem-safe，只允许小写字母、数字、点、下划线、短横线等。</li>
+                <li><code class="inline">SKILL.md</code> 必须有 YAML frontmatter，且包含 <code class="inline">name</code> / <code class="inline">description</code>。</li>
+                <li>内容有大小限制，避免 agent 写入过大的 prompt 包袱。</li>
+                <li>支持文件只能写到 <code class="inline">references</code>、<code class="inline">templates</code>、<code class="inline">scripts</code>、<code class="inline">assets</code>。</li>
+                <li>写文件用 atomic replace，避免半写入损坏。</li>
+                <li>可选打开 <code class="inline">skills.guard_agent_created</code>，对 agent-created skill 做安全扫描。</li>
+              </ul>
+            </article>
+          </div>
+
+          <pre><code>一次任务中的 skills 自学习闭环：
+
+user task
+  -> prompt_builder 注入 available skills index
+  -> model 判断相关 skill
+  -> skill_view(name) 加载完整操作手册
+  -> 执行任务 / 调工具 / 发现坑点
+  -> 如果是新套路：skill_manage(create)
+  -> 如果旧 skill 有问题：skill_manage(patch)
+  -> skill_usage 记录 view/use/patch
+  -> curator 周期性清理、合并、归档、修补 agent-created skills
+
+结果：
+  模型权重没有变
+  但下一次 runtime 上下文和可用操作手册变强了</code></pre>
+
+          <div class="callout">最准确的理解是：<strong>Hermes 的 skills 是外层 agentic learning，不是内层 agentic RL。</strong> 它不通过 reward 改 LoRA 或 base model 权重，而是通过持续改写 procedural memory，让 agent 的运行时上下文越来越像“经过项目经验训练过”。</div>
+          <div class="refs">参考：<code class="inline">/root/hermes/README.md</code>、<code class="inline">/root/hermes/agent/prompt_builder.py</code>、<code class="inline">/root/hermes/tools/skills_tool.py</code>、<code class="inline">/root/hermes/tools/skill_manager_tool.py</code>、<code class="inline">/root/hermes/tools/skill_usage.py</code>、<code class="inline">/root/hermes/agent/skill_commands.py</code>、<code class="inline">/root/hermes/agent/curator.py</code></div>
         </section>
 
         <section class="section reveal" id="hermes-workflow-linear">
