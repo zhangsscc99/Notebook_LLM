@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">19 sections</span>
+            <span class="toc-count">20 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -944,6 +944,7 @@
             <a href="#claude-workflow-17-io-spec-carriers">17 · Claude Code 工作流输入输出规范：核心数据载体有哪些</a>
             <a href="#claude-workflow-18-subagent-vs-agentteam-communication">18 · Claude Code subagent 和 Agent Team 里的通信方式有什么区别</a>
             <a href="#claude-workflow-19-agentteam-tasklist-mailbox-sendmessage">19 · Agent Team 里 TaskList、Mailbox、SendMessage 的区别</a>
+            <a href="#claude-workflow-20-langgraph-single-agent-two-tool-calls">20 · 用 LangGraph 讲 Claude Code 单 agent 两轮工具调用的 GraphState 和节点流转</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -5735,6 +5736,198 @@ TaskList = 团队任务状态板
 
           <div class="callout">最关键的区别：<strong>TaskList 管“事”，SendMessage 管“说话”，Mailbox 管“消息怎么送到”。</strong> 一个成熟的 Agent Team 工作流通常三者都用：任务状态进 TaskList，沟通提醒走 SendMessage，异步投递由 Mailbox 承担。</div>
           <div class="refs">参考文件：<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>、<code class="inline">src/tools/TeamCreateTool/prompt.ts</code>、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>、<code class="inline">src/utils/teammateMailbox.ts</code>、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/TaskListTool/TaskListTool.ts</code>、<code class="inline">src/tools/TaskUpdateTool/TaskUpdateTool.ts</code>、<code class="inline">src/tools/TaskGetTool/TaskGetTool.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>。</div>
+        </section>
+        <section class="section reveal" id="claude-workflow-20-langgraph-single-agent-two-tool-calls">
+          <div class="section-header"><div class="index">C20</div><h2>用 LangGraph 方式讲清楚 Claude Code 单 agent 模式：两到三轮思考、两次工具调用、GraphState、节点流转和条件边怎么走？</h2></div>
+          <p>这个案例可以把 Claude Code 的 <code class="inline">query.ts</code> 主循环理解成一个 LangGraph 风格的循环图。核心是：<strong>模型节点每轮输出 assistant message；如果 assistant message 里有 tool_use，就走工具节点并回到模型节点；如果没有 tool_use，就进入收尾并结束。</strong></p>
+          <div class="callout"><strong>先纠正一个关键点：</strong>你记得的“tool_use 作为循环终止条件”需要精确说：在 Claude Code 里，<code class="inline">tool_use</code> 是<strong>模型流式输出阶段的停止信号</strong>，也是<strong>agent 主循环继续的条件</strong>；真正让整个 agent 循环终止的是“本轮没有 tool_use”。源码注释也说不要完全相信 API 的 <code class="inline">stop_reason === 'tool_use'</code>，而是看流式过程中是否收集到了 <code class="inline">toolUseBlocks</code>。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">START：用户输入进入 <code class="inline">messages</code>。</div>
+            <div class="flow-step" data-step="2">prepare_context 节点：做 compact / microcompact / systemPrompt / tools / MCP / skill 上下文准备。</div>
+            <div class="flow-step" data-step="3">model 节点第 1 轮：Claude 思考后输出第一个 <code class="inline">tool_use</code>，例如 Read。</div>
+            <div class="flow-step" data-step="4">条件边 has_tool_use=true：进入 tools 节点。</div>
+            <div class="flow-step" data-step="5">tools 节点第 1 次：执行 Read，生成对应 <code class="inline">tool_result</code>，追加到 messages。</div>
+            <div class="flow-step" data-step="6">回到 prepare_context / model 第 2 轮：模型看到 Read 结果，再输出第二个 <code class="inline">tool_use</code>，例如 Grep 或 Edit。</div>
+            <div class="flow-step" data-step="7">tools 节点第 2 次：执行第二个工具，生成第二个 <code class="inline">tool_result</code>。</div>
+            <div class="flow-step" data-step="8">model 第 3 轮：模型看到两次工具结果，输出最终回答；这次没有 tool_use。</div>
+            <div class="flow-step" data-step="9">条件边 has_tool_use=false：进入 stop_hooks / finalize，返回 completed。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 如果用 LangGraph 定义 GraphState</h3>
+              <p>Claude Code 源码里的 <code class="inline">State</code> 大致可以映射成 LangGraph 的 GraphState：</p>
+              <pre><code>type GraphState = {
+  messages: Message[]
+  toolUseContext: ToolUseContext
+  assistantMessages: AssistantMessage[]
+  toolUseBlocks: ToolUseBlock[]
+  toolResults: UserMessage[]
+  turnCount: number
+  autoCompactTracking?: AutoCompactTrackingState
+  maxOutputTokensRecoveryCount: number
+  hasAttemptedReactiveCompact: boolean
+  stopHookActive?: boolean
+  transition?: { reason: string }
+}</code></pre>
+              <p>Claude Code 的真实 <code class="inline">State</code> 没有把 <code class="inline">assistantMessages/toolUseBlocks/toolResults</code> 长期存在 state 里，而是在每轮循环中作为局部变量收集；但用 LangGraph 讲解时，把它们放进 GraphState 更直观。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. LangGraph 节点怎么拆</h3>
+              <p>可以拆成这些节点：</p>
+              <ul>
+                <li><code class="inline">accept_input</code>：接收用户输入，形成 user message。</li>
+                <li><code class="inline">prepare_context</code>：做 compact、snip、microcompact、system prompt、tool context。</li>
+                <li><code class="inline">call_model</code>：调用 Claude，收集 assistant message 和 tool_use blocks。</li>
+                <li><code class="inline">run_tools</code>：执行本轮所有 tool_use，产出 tool_result。</li>
+                <li><code class="inline">inject_runtime_attachments</code>：注入 task notification、memory、skill discovery、file change 等。</li>
+                <li><code class="inline">finalize</code>：stop hooks、usage、result、transcript 收尾。</li>
+              </ul>
+              <p>Claude Code 的实现不是显式图框架，而是在 <code class="inline">query.ts</code> 的 <code class="inline">while(true)</code> 里按这个顺序手写状态机。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 条件边的核心：has_tool_use</h3>
+              <p>最重要的条件边是：</p>
+              <pre><code>call_model -> if toolUseBlocks.length > 0:
+                run_tools
+              else:
+                finalize</code></pre>
+              <p>Claude Code 源码里明确说：<code class="inline">stop_reason === 'tool_use'</code> 不可靠，所以真正判断本轮是否要进工具执行，是流式过程中是否收集到了 <code class="inline">toolUseBlocks</code>。这就是你说的“tool_use 控制循环”的准确版本。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 工具节点执行后为什么一定回到模型节点</h3>
+              <p>工具调用本身不等于任务完成。工具只是给模型补充外部信息或执行动作。Claude Code 在工具执行后会把 <code class="inline">assistantMessages + toolResults</code> 追加回 <code class="inline">messages</code>，构造新的 <code class="inline">next: State</code>，然后 <code class="inline">continue</code> 回到 while 循环顶部。</p>
+              <p>LangGraph 里就是：</p>
+              <pre><code>run_tools -> inject_runtime_attachments -> prepare_context -> call_model</code></pre>
+              <p>所以两次工具调用如果分别发生在不同轮次里，本质就是这条循环边走了两次。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>第 1 轮：模型决定先读文件</h3>
+              <pre><code>messages = [User("解释 auth bug 并修复")]
+
+call_model 输出：
+Assistant([
+  Text("我先看相关文件"),
+  ToolUse(id=&quot;toolu_1&quot;, name=&quot;Read&quot;, input={file_path:&quot;src/auth.ts&quot;})
+])
+
+toolUseBlocks.length = 1
+条件边：call_model -> run_tools</code></pre>
+              <p>这里 assistant 的 tool_use 让 API 这一轮生成停在工具调用处；但对 agent 图来说，它不是结束，而是进入工具节点。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>第 1 次工具执行：Read 结果回填</h3>
+              <pre><code>run_tools 执行 Read
+生成：
+User([
+  ToolResult(tool_use_id=&quot;toolu_1&quot;, content=&quot;auth.ts 文件内容...&quot;)
+])
+
+messages 变成：
+[User任务, Assistant含Read工具调用, User含Read结果]
+
+条件边：run_tools -> prepare_context -> call_model</code></pre>
+              <p>注意 tool_result 必须和 tool_use_id 对齐。Claude Code 非常重视这个闭合，否则 Anthropic API 的消息结构会不合法。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>第 2 轮：模型基于 Read 结果再调用工具</h3>
+              <pre><code>call_model 看到 auth.ts 内容后输出：
+Assistant([
+  Text("我发现 token 校验在 helper 里，再搜调用点"),
+  ToolUse(id=&quot;toolu_2&quot;, name=&quot;Grep&quot;, input={pattern:&quot;validateToken&quot;})
+])
+
+toolUseBlocks.length = 1
+条件边：call_model -> run_tools</code></pre>
+              <p>这就是“两次工具调用分别在不同轮次里”的关键：第二次 tool_use 不是和第一次同批执行，而是在第一次 tool_result 回到上下文后，由模型重新判断出来的。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>第 2 次工具执行：Grep 结果回填</h3>
+              <pre><code>run_tools 执行 Grep
+生成：
+User([
+  ToolResult(tool_use_id=&quot;toolu_2&quot;, content=&quot;validateToken 出现在 login.ts 和 session.ts&quot;)
+])
+
+messages 追加第二个工具结果
+turnCount++
+继续下一轮模型调用</code></pre>
+              <p>源码里这个继续动作对应 <code class="inline">const next: State = { messages: [...messagesForQuery, ...assistantMessages, ...toolResults], turnCount: nextTurnCount, transition: { reason: 'next_turn' } }</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>第 3 轮：没有 tool_use，循环结束</h3>
+              <pre><code>call_model 输出：
+Assistant([
+  Text("问题原因是 login.ts 使用旧 token 校验路径。修复建议如下...")
+])
+
+toolUseBlocks.length = 0
+条件边：call_model -> finalize -> END</code></pre>
+              <p>这时才是 agent 主循环完成。也就是说，Claude Code 的循环终止条件更准确地说是：<strong>模型这一轮没有产生 tool_use，并且 stop hooks / recovery / budget 检查没有要求继续。</strong></p>
+            </article>
+
+            <article class="mini-card">
+              <h3>对应的 LangGraph 伪代码</h3>
+              <pre><code>graph.addNode("prepare_context", prepareContext)
+graph.addNode("call_model", callModel)
+graph.addNode("run_tools", runTools)
+graph.addNode("inject_attachments", injectAttachments)
+graph.addNode("finalize", finalize)
+
+graph.addEdge(START, "prepare_context")
+graph.addEdge("prepare_context", "call_model")
+graph.addConditionalEdges("call_model", state => {
+  if (state.abort) return "finalize"
+  if (state.toolUseBlocks.length > 0) return "run_tools"
+  return "finalize"
+})
+graph.addEdge("run_tools", "inject_attachments")
+graph.addConditionalEdges("inject_attachments", state => {
+  if (state.maxTurnsExceeded) return "finalize"
+  return "prepare_context"
+})
+graph.addEdge("finalize", END)</code></pre>
+            </article>
+          </div>
+
+          <pre><code>完整案例流转：
+
+START
+  -> accept_input
+  -> prepare_context
+  -> call_model round 1
+       assistant emits Read tool_use
+  -> has_tool_use=true
+  -> run_tools round 1
+       Read tool_result
+  -> inject_runtime_attachments
+  -> prepare_context
+  -> call_model round 2
+       assistant emits Grep tool_use
+  -> has_tool_use=true
+  -> run_tools round 2
+       Grep tool_result
+  -> inject_runtime_attachments
+  -> prepare_context
+  -> call_model round 3
+       assistant emits final text, no tool_use
+  -> has_tool_use=false
+  -> stop_hooks / finalize
+  -> END completed</code></pre>
+
+          <div class="callout">最重要的心智模型：<strong>Claude Code 的单 agent 工作流不是“模型一次想完再执行”，而是“模型每轮只决定下一步；tool_use 触发工具节点；tool_result 回填后再让模型重新判断；直到某轮没有 tool_use 才结束”。</strong> 用 LangGraph 表达，就是一个围绕 <code class="inline">has_tool_use</code> 条件边反复回到 <code class="inline">call_model</code> 的循环图。</div>
+          <div class="refs">参考文件：<code class="inline">src/query.ts:204-230</code>（State）、<code class="inline">src/query.ts:545-570</code>（toolUseBlocks 作为流式 tool_use 信号）、<code class="inline">src/query.ts:650-875</code>（模型流式调用并收集 tool_use）、<code class="inline">src/query.ts:1060-1357</code>（没有 tool_use 时收尾/恢复/completed）、<code class="inline">src/query.ts:1380-1420</code>（StreamingToolExecutor/runTools 执行工具）、<code class="inline">src/query.ts:1556-1635</code>（注入 queued command/task notification attachments）、<code class="inline">src/query.ts:1690-1725</code>（构造 next State 并进入下一轮）。</div>
         </section>
 
 
