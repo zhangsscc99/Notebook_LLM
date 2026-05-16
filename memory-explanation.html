@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">17 sections</span>
+            <span class="toc-count">18 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -942,6 +942,7 @@
             <a href="#claude-workflow-15-orchestration-vs-planning">15 · 工作流编排和广义 agent 任务规划的核心差异是什么</a>
             <a href="#claude-workflow-16-execution-modes">16 · Claude Code 支持哪几种工作流执行模式，各自适用场景是什么</a>
             <a href="#claude-workflow-17-io-spec-carriers">17 · Claude Code 工作流输入输出规范：核心数据载体有哪些</a>
+            <a href="#claude-workflow-18-subagent-vs-agentteam-communication">18 · Claude Code subagent 和 Agent Team 里的通信方式有什么区别</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -5495,6 +5496,96 @@ CI/API -> Headless/SDK</code></pre>
   -> SDKMessage / UI message / result</code></pre>
           <div class="callout">关键规范：<strong>tool_use 必须和 tool_result 配对，Message[] 必须可持久化和恢复，Attachment 必须能规范化成模型可读上下文，最终 result 必须能被 SDK/CLI 稳定消费。</strong></div>
           <div class="refs">参考文件：<code class="inline">src/types/message.ts</code>、<code class="inline">src/Tool.ts</code>、<code class="inline">src/QueryEngine.ts</code>、<code class="inline">src/query.ts</code>、<code class="inline">src/utils/processUserInput/processUserInput.ts</code>、<code class="inline">src/utils/messages.ts</code>、<code class="inline">src/utils/attachments.ts</code>、<code class="inline">src/tasks/types.ts</code>。</div>
+        </section>
+        <section class="section reveal" id="claude-workflow-18-subagent-vs-agentteam-communication">
+          <div class="section-header"><div class="index">C18</div><h2>Claude Code subagent 和 Agent Team 里的通信方式有什么区别？</h2></div>
+          <p>Claude Code 里 <strong>subagent</strong> 和 <strong>Agent Team / teammate</strong> 都是“多 agent”，但通信方式完全不同。subagent 更像父 agent 通过 <code class="inline">Agent</code> 工具派出去的一次性任务调用；Agent Team 更像多个长期成员通过 mailbox、TaskList 和 SendMessage 协作。</p>
+          <div class="callout"><strong>最短结论：</strong>subagent 通信是 <code class="inline">tool_use / tool_result</code> 风格的父子调用；Agent Team 通信是 <code class="inline">mailbox + SendMessage + TaskList + idle notification</code> 风格的团队协作协议。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. subagent：父 agent 调工具，子 agent 返回结果</h3>
+              <p>普通 subagent 的入口是 <code class="inline">src/tools/AgentTool/AgentTool.tsx</code>。父 agent 输出：</p>
+              <pre><code>Agent({
+  description: "Research auth",
+  subagent_type: "Explore",
+  prompt: "搜索登录链路并返回关键文件"
+})</code></pre>
+              <p>运行时执行 <code class="inline">AgentTool.call()</code>，再通过 <code class="inline">runAgent()</code> 启动另一个 <code class="inline">query()</code> loop。子 agent 完成后，结果被包装成父 agent 的 <code class="inline">tool_result</code>；如果是后台执行，则先返回 <code class="inline">async_launched</code>，完成后回一个 <code class="inline">&lt;task-notification&gt;</code>。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. Agent Team：成员之间靠 mailbox 发消息</h3>
+              <p>Agent Team 先由 <code class="inline">TeamCreate</code> 创建 team，再用 <code class="inline">Agent({ name, team_name, prompt })</code> 创建 teammate。只要 <code class="inline">AgentTool.call()</code> 发现 <code class="inline">teamName && name</code>，就不走普通 subagent，而是走 <code class="inline">spawnTeammate()</code>。</p>
+              <p>teammate 的消息不是直接作为父 agent 的 tool_result 返回，而是写入对方 inbox 文件：</p>
+              <pre><code>~/.claude/teams/{team_name}/inboxes/{agent_name}.json</code></pre>
+              <p>收件方下一轮从 mailbox 读取消息，再把它格式化成 <code class="inline">&lt;teammate-message&gt;</code> 注入自己的模型上下文。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 生命周期差异：一次性 vs 长期在线</h3>
+              <p><strong>subagent</strong> 通常是一次性：接收 prompt → 跑自己的 query loop → 返回最终结果 → 结束。即使是 async subagent，也是一个 background task，核心是完成某个任务后通知父 agent。</p>
+              <p><strong>teammate</strong> 是长期 worker：接收一个 prompt 跑一轮，完成后进入 idle，不退出；后续可以继续接收 <code class="inline">SendMessage</code>、领取 TaskList 里的任务、等待 shutdown request。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 通信拓扑差异：树状父子 vs 团队网状</h3>
+              <p>subagent 的通信拓扑主要是父子结构：父 agent → AgentTool → child agent → tool_result/task-notification → 父 agent。</p>
+              <p>Agent Team 是 team 结构：leader 可以给任意 teammate 发消息，teammate 也可以给 leader 或其他 teammate 发消息，甚至可以广播。TaskList 是共享协调面，mailbox 是异步消息面。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 上下文可见性差异</h3>
+              <p>subagent 的父 agent通常只看到子 agent 的最终总结、usage、agentId 或 task notification；不会天然看到子 agent 内部每一步完整思考和工具过程。</p>
+              <p>Agent Team 里，成员之间也不共享隐藏上下文。它们只共享显式消息、共享任务列表、共享项目文件，以及 team config。也就是说团队协作依赖“写出来的消息”，不是共享脑内状态。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. 控制工具差异</h3>
+              <p>subagent 后续控制主要靠 <code class="inline">agentId</code>、<code class="inline">SendMessage</code>、output file、<code class="inline">TaskStop</code>。</p>
+              <p>Agent Team 控制更丰富：<code class="inline">SendMessage</code> 用于 teammate 消息；<code class="inline">TaskCreate/TaskList/TaskUpdate/TaskGet</code> 用于任务板；<code class="inline">plan_approval_response</code> 用于计划审批；<code class="inline">shutdown_request</code> 用于优雅退出。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. 承载方式差异</h3>
+              <p>subagent 多数是在同一进程内由 <code class="inline">runAgent()</code> 再跑一个 query loop，也可以 background 化或 worktree/remote 隔离。</p>
+              <p>Agent Team 的 teammate 可以由不同 backend 承载：tmux split pane、iTerm2 pane、外部 tmux swarm session，或者 in-process backend。pane backend 更像独立 Claude Code 终端；in-process backend 则用 AsyncLocalStorage 做身份隔离。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 什么时候用哪个</h3>
+              <p>用 <strong>subagent</strong>：你只需要一个专家短暂帮忙，比如搜索代码、生成方案、检查某个模块、并行跑一个一次性任务。</p>
+              <p>用 <strong>Agent Team</strong>：你需要多个长期角色协作，比如 researcher、implementer、tester 持续交换消息，共享任务板，分阶段完成一个大项目。</p>
+            </article>
+          </div>
+
+          <pre><code>通信方式对比：
+
+subagent
+  父 agent
+    -> Agent tool_use(prompt, subagent_type, run_in_background)
+    -> AgentTool.call()
+    -> runAgent() / child query loop
+    -> completed tool_result
+       或 async_launched + task-notification
+    -> 父 agent 下一轮继续
+
+Agent Team
+  TeamCreate
+    -> team config + task list
+  Agent(name, team_name, prompt)
+    -> spawnTeammate()
+    -> backend 启动 teammate
+    -> prompt 写入 mailbox
+  teammates
+    -> SendMessage 写 inbox
+    -> mailbox 读消息
+    -> <teammate-message> 注入上下文
+    -> TaskList/TaskUpdate 协同
+    -> idle notification / shutdown_request</code></pre>
+
+          <div class="callout">关键区别：<strong>subagent 是“父 agent 通过工具调用临时委托任务”；Agent Team 是“多个命名成员通过消息系统和任务板长期协作”。</strong> 前者结果回到父 agent 的工具结果链路，后者消息进入 mailbox 和 team workflow。</div>
+          <div class="refs">参考文件：<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>、<code class="inline">src/tools/AgentTool/runAgent.ts</code>、<code class="inline">src/tasks/LocalAgentTask/LocalAgentTask.tsx</code>、<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>、<code class="inline">src/tools/shared/spawnMultiAgent.ts</code>、<code class="inline">src/utils/teammateMailbox.ts</code>、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>、<code class="inline">src/utils/swarm/backends/registry.ts</code>、<code class="inline">src/tools/TaskCreateTool/*</code>、<code class="inline">src/tools/TaskListTool/*</code>、<code class="inline">src/tools/TaskUpdateTool/*</code>。</div>
         </section>
 
 
