@@ -906,6 +906,15 @@
             <a href="#s34">34 · 分层记忆和会话怎么记住</a>
           </div>
         </details>
+        <details class="toc-group" id="openclawGatewayTocGroup" open>
+          <summary>
+            <span class="toc-group-title">OpenClaw Gateway</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#openclaw-gateway-overview">01 · OpenClaw 的网关到底是干什么的</a>
+          </div>
+        </details>
         <details class="toc-group" id="joyAgentTocGroup" open>
           <summary>
             <span class="toc-group-title">京东Joy Agent</span>
@@ -1947,6 +1956,86 @@ memory_get({
 }</code></pre>
           <div class="callout">关键区别：当前会话靠 session transcript 延续；长期事实靠 Markdown memory 保存；跨会话召回可以靠可选的 session transcript indexing。时间戳帮助排序、生命周期和 daily 文件组织，但不是唯一的“记住机制”。</div>
           <div class="refs">参考：<code class="inline">docs/concepts/session.md</code>、<code class="inline">docs/concepts/agent.md</code>、<code class="inline">docs/reference/memory-config.md</code>、<code class="inline">docs/concepts/memory-qmd.md</code>、<code class="inline">packages/memory-host-sdk/src/host/session-files.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code></div>
+        </section>
+
+        <section class="section reveal" id="openclaw-gateway-overview">
+          <div class="section-header"><div class="index">G1</div><h2>OpenClaw 的网关到底是干什么的</h2></div>
+          <p><strong>OpenClaw Gateway</strong> 不是“模型网关”这么简单。它更像 OpenClaw 的<strong>常驻入口层 + 控制面 + 会话路由器 + 协议适配层</strong>：外部客户端、网页 Control UI、CLI、手机端、Telegram / Synology Chat 等 channel 插件，都可以通过它把一条消息变成一次 OpenClaw agent run。</p>
+          <div class="callout"><strong>一句话：</strong>Agent runtime 是真正干活的大脑和手；Gateway 是门口的前台、安检、分诊台和事件总线。它负责“谁能进来、要找哪个 agent / session、用什么协议进来、结果怎么流回去”。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 它首先是一个常驻服务</h3>
+              <p><code class="inline">openclaw gateway run</code> 会走 <code class="inline">src/cli/gateway-cli/run.ts</code>，解析端口、bind 地址、认证、Tailscale、日志等配置，然后懒加载 <code class="inline">src/gateway/server.ts</code>，最终进入 <code class="inline">startGatewayServer()</code>。</p>
+              <p>默认连接地址在客户端里能看到：<code class="inline">ws://127.0.0.1:18789</code>。也就是说，它默认是本机 WebSocket/RPC 服务；如果配置成非 loopback 或远程暴露，就必须处理认证和安全策略。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 它把外部协议统一成 Gateway RPC</h3>
+              <p>CLI 侧的 <code class="inline">callGateway()</code> 会创建 <code class="inline">GatewayClient</code>，通过 WebSocket 发送形如 <code class="inline">{ type: "req", id, method, params }</code> 的请求帧。服务端用 <code class="inline">handleGatewayRequest()</code> 根据 <code class="inline">method</code> 分发到对应 handler。</p>
+              <p>所以外部入口不需要直接知道 agent 内部主循环怎么跑，只要调用 <code class="inline">agent</code>、<code class="inline">chat.send</code>、<code class="inline">sessions.send</code>、<code class="inline">tools.invoke</code> 这类方法。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 它维护“控制面”能力</h3>
+              <p><code class="inline">server-methods-list.ts</code> 里列了很多 Gateway 方法：<code class="inline">agents.*</code>、<code class="inline">sessions.*</code>、<code class="inline">chat.*</code>、<code class="inline">tools.*</code>、<code class="inline">skills.*</code>、<code class="inline">artifacts.*</code>、<code class="inline">cron.*</code>、<code class="inline">nodes.*</code>、<code class="inline">exec.approval.*</code> 等。</p>
+              <p>这说明 Gateway 不只是转发一句 prompt，而是把“创建 agent、列会话、发消息、查历史、调工具、看产物、做审批、跑定时任务、管理远端节点”都做成统一控制 API。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 它负责安全入口</h3>
+              <p><code class="inline">server-runtime-config.ts</code> 会解析 <code class="inline">gateway.bind</code>、auth token / password / trusted proxy、Control UI allowed origins、Tailscale serve / funnel 等。源码里明确拒绝“非 loopback bind 但没有认证”的配置。</p>
+              <p>这就是 Gateway 的“安检”职责：如果只在本机跑，可以是本地 RPC；如果要给手机、网页或公网入口用，就必须做认证、来源限制、rate limit、TLS / Tailscale 等保护。</p>
+            </article>
+          </div>
+
+          <p>最典型的一次请求链路可以这样理解：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">用户从 CLI、Control UI、移动端或 channel 插件发来消息。</div>
+            <div class="flow-step" data-step="2">Gateway 先处理连接、认证、scope / role 权限、请求大小和来源安全。</div>
+            <div class="flow-step" data-step="3">请求被统一成 Gateway RPC：例如 <code class="inline">method = "agent"</code>，参数里带 <code class="inline">message</code>、<code class="inline">agentId</code>、<code class="inline">sessionKey</code>、<code class="inline">channel</code>、<code class="inline">idempotencyKey</code>。</div>
+            <div class="flow-step" data-step="4"><code class="inline">handleGatewayRequest()</code> 分发到 <code class="inline">server-methods/agent.ts</code> 的 <code class="inline">agent</code> handler。</div>
+            <div class="flow-step" data-step="5">agent handler 做 session 解析、附件处理、模型覆盖权限判断、去重、超时/abort 注册、必要的 startup context 注入。</div>
+            <div class="flow-step" data-step="6">真正执行时调用 <code class="inline">agentCommandFromIngress()</code>，进入 OpenClaw 的 agent runtime：模型思考、工具调用、写 transcript、产出回复。</div>
+            <div class="flow-step" data-step="7">Gateway 把运行状态、chat/session 事件、最终回复、artifact / media 链接再流回客户端或交给 channel 做外发。</div>
+          </div>
+
+          <pre><code>外部入口
+  ├─ CLI: openclaw agent --message ...
+  ├─ Control UI / WebChat
+  ├─ 手机端 / 远程节点
+  └─ Telegram / Synology Chat / Webhook 等插件
+        ↓
+Gateway HTTP / WebSocket / RPC
+  ├─ auth / role / scope / rate limit
+  ├─ method dispatch: agent, chat.send, sessions.*, tools.invoke ...
+  ├─ session / agent / channel routing
+  └─ event streaming / result delivery
+        ↓
+OpenClaw Agent Runtime
+  ├─ LLM 调用
+  ├─ tools / sandbox / approvals
+  ├─ transcript / artifacts / memory
+  └─ reply payloads</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么不让每个入口直接调 agent？</h3>
+              <p>如果 Telegram、网页、CLI、手机端都各自直接接 agent runtime，就会重复实现认证、session 绑定、附件处理、错误恢复、事件流、权限和审计。Gateway 把这些横切逻辑集中起来，入口只要适配 Gateway 协议。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它和普通反向代理的区别</h3>
+              <p>普通反向代理主要做 HTTP 转发；OpenClaw Gateway 里面有业务语义：它认识 agent、session、channel、tool、artifact、skill、approval、node、cron。它不是“把请求转到另一个服务”就结束，而是直接参与任务生命周期管理。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它和模型 API 网关的区别</h3>
+              <p>模型 API 网关通常只负责模型路由、限流、计费、兼容 OpenAI API。OpenClaw Gateway 虽然也能暴露 OpenAI-compatible 的 <code class="inline">/v1/chat/completions</code>、<code class="inline">/v1/responses</code>、models、embeddings 等 HTTP 入口，但更核心的是 agent 应用控制面。</p>
+            </article>
+            <article class="mini-card">
+              <h3>失败时怎么处理</h3>
+              <p><code class="inline">agent-via-gateway.ts</code> 里能看到 CLI 通过 Gateway 发 <code class="inline">agent</code> 请求；如果 Gateway 超时或传输失败，可以 fallback 到 embedded agent。本质上 Gateway 是推荐的统一入口，但本地 CLI 仍保留直接跑 agent 的兜底路径。</p>
+            </article>
+          </div>
+
+          <div class="callout">最容易记的说法：<strong>OpenClaw Gateway = OpenClaw 的“外部接入层 + 远程控制面”。</strong> 它不负责替模型思考；它负责让各种外部入口安全、统一、可观测地驱动同一套 agent runtime。</div>
+          <div class="refs">参考：<code class="inline">src/cli/gateway-cli/run.ts</code>、<code class="inline">src/gateway/server.ts</code>、<code class="inline">src/gateway/server.impl.ts</code>、<code class="inline">src/gateway/server-http.ts</code>、<code class="inline">src/gateway/client.ts</code>、<code class="inline">src/gateway/call.ts</code>、<code class="inline">src/gateway/server-methods.ts</code>、<code class="inline">src/gateway/server-methods-list.ts</code>、<code class="inline">src/gateway/server-methods/agent.ts</code>、<code class="inline">src/commands/agent-via-gateway.ts</code>、<code class="inline">src/gateway/server-runtime-config.ts</code></div>
         </section>
 
         <section class="section reveal" id="joyagent-overview">
