@@ -957,6 +957,15 @@
             <a href="#claude-workflow-21-agentteam-tasklist-shared-sync-loop">21 · Agent Team 的 TaskList 是否共享同步、每轮是否先读 mailbox 和 TaskList</a>
           </div>
         </details>
+        <details class="toc-group" id="claudeToolsTocGroup" open>
+          <summary>
+            <span class="toc-group-title">Claude Code 的工具调用</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
+          </div>
+        </details>
         <details class="toc-group" id="toolsTocGroup">
           <summary>
             <span class="toc-group-title">OpenClaw Tools</span>
@@ -6168,6 +6177,108 @@ Mailbox
 
           <div class="callout">最终答案：<strong>TaskList 是 team 共享且可被各 agent 读写的任务状态板；Mailbox 是异步消息队列；每个 agent 不会每次模型思考都强制读两者，但 teammate 空闲取下一项工作时会先读 mailbox，再尝试从 TaskList 领取任务；整个 team 由初始目标启动，但运行中真正围绕共享 TaskList 和消息流推进。</strong></div>
           <div class="refs">参考文件：<code class="inline">src/utils/tasks.ts</code>（getTaskListId、TaskList 文件读写、claimTask）、<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>（创建 team 和 task list）、<code class="inline">src/tools/TeamCreateTool/prompt.ts</code>（team workflow 和任何 agent 可更新 ownership 的说明）、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/TaskListTool/TaskListTool.ts</code>、<code class="inline">src/tools/TaskUpdateTool/TaskUpdateTool.ts</code>（owner 变化后 mailbox 通知）、<code class="inline">src/tools/TaskGetTool/TaskGetTool.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>（idle loop 先 mailbox 后 task list）、<code class="inline">src/utils/teammateMailbox.ts</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-tools-overview-scheduling-recovery">
+          <div class="section-header"><div class="index">CT1</div><h2>Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</h2></div>
+          <p>Claude Code 的工具调用不是“模型随便输出一个函数名然后执行”。源码里它被做成一套完整协议：<strong>工具注册表 → 模型 tool_use → schema 校验 → 权限/Hook → 并发调度 → tool.call() → tool_result 回填 → 下一轮模型纠错或继续</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 把工具调用当成 agent 主循环的控制流。模型只负责提出 <code class="inline">tool_use</code>；运行时负责验证、授权、调度、执行、格式化结果和失败恢复。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 工具从哪里来</h3>
+              <p>核心入口是 <code class="inline">src/tools.ts</code>。<code class="inline">getAllBaseTools()</code> 收集内置工具；<code class="inline">getTools()</code> 根据 permission context、simple mode、REPL mode、feature flag、deny rule 过滤；<code class="inline">assembleToolPool()</code> 再把内置工具和 MCP tools 合并去重。</p>
+              <p>所以“Claude Code 有哪些工具”不是固定死的一张表，而是由运行环境、权限模式、MCP 连接、feature flags 和 agent 配置共同决定。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 工具对象长什么样</h3>
+              <p><code class="inline">src/Tool.ts</code> 定义了统一 <code class="inline">Tool</code> 接口：<code class="inline">name</code>、<code class="inline">inputSchema</code>、<code class="inline">call()</code>、<code class="inline">validateInput()</code>、<code class="inline">checkPermissions()</code>、<code class="inline">isConcurrencySafe()</code>、<code class="inline">mapToolResultToToolResultBlockParam()</code> 等。</p>
+              <p><code class="inline">buildTool()</code> 会补默认行为：默认启用、默认非并发安全、默认非只读、默认权限 allow。关键点是：每个工具都必须能把自己的返回值映射成 Anthropic API 需要的 <code class="inline">tool_result</code>。</p>
+            </article>
+          </div>
+
+          <p>按能力分，Claude Code 的主要工具可以这样记：</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>文件与代码</h3><p><code class="inline">Read</code>、<code class="inline">Edit</code>、<code class="inline">Write</code>、<code class="inline">NotebookEdit</code>、<code class="inline">Glob</code>、<code class="inline">Grep</code>、可选 <code class="inline">LSP</code>。这是读代码、搜代码、改代码的主力。</p></article>
+            <article class="mini-card"><h3>Shell 与系统</h3><p><code class="inline">Bash</code>、可选 <code class="inline">PowerShell</code>、可选 <code class="inline">REPL</code>。源码提示里也要求：读文件优先用 Read，搜内容优先用 Grep，编辑优先用 Edit，不要滥用 shell 代替专用工具。</p></article>
+            <article class="mini-card"><h3>Web / MCP / Skill</h3><p><code class="inline">WebFetch</code>、<code class="inline">WebSearch</code>、<code class="inline">ListMcpResourcesTool</code>、<code class="inline">ReadMcpResourceTool</code>、动态 MCP tools、<code class="inline">Skill</code>、<code class="inline">ToolSearch</code>。其中 ToolSearch 用于延迟加载工具 schema，减少首轮上下文压力。</p></article>
+            <article class="mini-card"><h3>Agent / Team / 任务</h3><p><code class="inline">Agent</code>、<code class="inline">SendMessage</code>、<code class="inline">TaskOutput</code>、<code class="inline">TaskStop</code>、<code class="inline">TeamCreate</code>、<code class="inline">TeamDelete</code>、<code class="inline">TaskCreate</code>、<code class="inline">TaskGet</code>、<code class="inline">TaskList</code>、<code class="inline">TaskUpdate</code>、<code class="inline">TodoWrite</code>。这些不是普通“工具”，而是多 agent / 多任务编排入口。</p></article>
+            <article class="mini-card"><h3>模式切换</h3><p><code class="inline">EnterPlanMode</code>、<code class="inline">ExitPlanMode</code>、可选 <code class="inline">EnterWorktree</code>、<code class="inline">ExitWorktree</code>。它们改变执行模式、审批边界或工作区隔离方式。</p></article>
+            <article class="mini-card"><h3>用户与自动化</h3><p><code class="inline">AskUserQuestion</code>、<code class="inline">Config</code>、<code class="inline">SendUserMessage</code> / <code class="inline">Brief</code>、可选 <code class="inline">CronCreate</code>、<code class="inline">CronDelete</code>、<code class="inline">CronList</code>、<code class="inline">RemoteTrigger</code> 等。部分工具只在 Anthropic 内部用户、实验 feature 或特定模式下出现。</p></article>
+          </div>
+
+          <p>一次工具调用的调度链路如下：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><code class="inline">query.ts</code> 调模型，流式收 assistant message。如果 assistant content 里出现 <code class="inline">tool_use</code> block，就加入 <code class="inline">toolUseBlocks</code>。</div>
+            <div class="flow-step" data-step="2">如果本轮没有 <code class="inline">tool_use</code>，主循环进入 stop hooks / 收尾 / recovery；如果有，就进入工具执行。</div>
+            <div class="flow-step" data-step="3">工具执行有两条路：开启 streaming execution 时用 <code class="inline">StreamingToolExecutor</code>，否则用 <code class="inline">runTools()</code>。</div>
+            <div class="flow-step" data-step="4"><code class="inline">runTools()</code> 会按 <code class="inline">isConcurrencySafe()</code> 分批：连续的并发安全工具并行跑；写文件、shell 等不安全工具串行跑。</div>
+            <div class="flow-step" data-step="5">每个 tool_use 进入 <code class="inline">runToolUse()</code>：查工具名、解析输入、跑权限、执行 <code class="inline">tool.call()</code>。</div>
+            <div class="flow-step" data-step="6">结果被包装成 user message 里的 <code class="inline">tool_result</code>，带回 <code class="inline">query.ts</code>，追加到 messages，然后下一轮模型继续判断。</div>
+          </div>
+
+          <pre><code>assistant message
+  -> content includes tool_use blocks
+       [{ id: "toolu_1", name: "Read", input: {...} }]
+  -> query.ts 收集 toolUseBlocks
+  -> StreamingToolExecutor / runTools
+  -> runToolUse
+       1. findToolByName
+       2. inputSchema.safeParse
+       3. validateInput
+       4. PreToolUse hooks
+       5. permission decision / canUseTool
+       6. tool.call
+       7. PostToolUse hooks
+       8. mapToolResultToToolResultBlockParam
+  -> user message: tool_result(tool_use_id="toolu_1")
+  -> 回到下一轮模型</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>3. 怎么纠错：先把错误变成模型可读的 tool_result</h3>
+              <p>Claude Code 的核心恢复策略不是“运行时报错就崩”，而是尽量把错误包装成 <code class="inline">is_error: true</code> 的 <code class="inline">tool_result</code> 喂回模型。模型下一轮看到错误原因，就可以改参数、换工具、先读文件、重新搜索或请求用户确认。</p>
+              <p>例如工具名不存在时，<code class="inline">runToolUse()</code> 返回 <code class="inline">No such tool available</code>；输入 schema 不匹配时，返回 <code class="inline">InputValidationError</code>；工具自己的 <code class="inline">validateInput()</code> 不通过时，返回具体校验消息。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. ToolSearch 纠错：工具 schema 没加载时提醒模型先加载</h3>
+              <p>当 ToolSearch / deferred tool 开启时，有些工具 schema 不在首轮 prompt 里。模型可能凭名字猜参数，导致数组、布尔、数字被写错类型。<code class="inline">buildSchemaNotSentHint()</code> 会在 Zod 错误后追加提示：先调用 <code class="inline">ToolSearch</code> 选择这个工具，再重试。</p>
+              <p>这是一种很典型的“上下文工程式恢复”：不是扩大所有工具 schema，而是在失败时给模型一个明确修正路径。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. 权限失败怎么处理</h3>
+              <p>工具执行前会跑 PreToolUse hooks、通用权限系统和工具自己的 <code class="inline">checkPermissions()</code>。如果结果不是 allow，就返回错误 tool_result；如果是 auto-mode classifier 拒绝，还会跑 <code class="inline">PermissionDenied</code> hooks。Hook 可以返回 retry 信号，告诉模型“现在可以重试”。</p>
+              <p>所以权限失败不是静默失败，而是变成下一轮模型能读懂的反馈。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. 工具运行异常怎么处理</h3>
+              <p><code class="inline">tool.call()</code> 外层有 try/catch。异常会被 <code class="inline">formatError()</code> 转成错误 tool_result；同时记录 telemetry，MCP auth 错误会把 MCP client 状态改成 <code class="inline">needs-auth</code>，并执行 <code class="inline">PostToolUseFailure</code> hooks。</p>
+              <p>这保证一次工具崩溃不会直接破坏整个消息协议。</p>
+            </article>
+          </div>
+
+          <p>失败后的“自动恢复”可以分三层理解：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>第一层：工具级恢复</h3>
+              <p>输入错、工具名错、权限拒绝、文件没读过就 Edit、Write 覆盖前没 Read、MCP 需要认证等，都会尽量变成错误 <code class="inline">tool_result</code>。下一轮模型根据错误信息自行修正动作。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第二层：调度级恢复</h3>
+              <p><code class="inline">StreamingToolExecutor</code> 会控制并发：并发安全工具可以同时执行；非安全工具独占。若并发 Bash 出错，它会中止兄弟 Bash 子进程并生成 synthetic error，避免一批依赖链命令继续乱跑。</p>
+            </article>
+            <article class="mini-card">
+              <h3>第三层：模型/API 级恢复</h3>
+              <p><code class="inline">query.ts</code> 对 prompt-too-long、max_output_tokens、图片/媒体过大、模型 fallback 等有专门 recovery 逻辑：先 withheld 可恢复错误，尝试 context collapse、reactive compact、提高输出 token 或切 fallback model；失败后才把错误暴露出去。</p>
+            </article>
+            <article class="mini-card">
+              <h3>协议闭合恢复</h3>
+              <p>中断、异常或 fallback 时，Claude Code 会尽量补齐缺失的 <code class="inline">tool_result</code>，避免出现 assistant 发了 tool_use 但 user 没有对应 tool_result 的非法消息结构。这个细节很关键，否则下一次 Anthropic API 调用会因为消息不闭合而失败。</p>
+            </article>
+          </div>
+
+          <div class="callout">最重要的心智模型：<strong>Claude Code 的工具系统不是“工具执行器”，而是一个可纠错的模型-工具协议层。</strong> 它让模型用 tool_use 表达意图，让运行时用 schema、权限、并发、安全、hook 和错误 tool_result 把意图变成可审计、可恢复的工程动作。</div>
+          <div class="refs">参考文件：<code class="inline">src/tools.ts</code>（工具注册、过滤、MCP 合并）、<code class="inline">src/Tool.ts</code>（Tool 接口和 buildTool 默认行为）、<code class="inline">src/query.ts</code>（tool_use 主循环、recovery、缺失 tool_result 补齐）、<code class="inline">src/services/tools/toolOrchestration.ts</code>（按并发安全分批调度）、<code class="inline">src/services/tools/StreamingToolExecutor.ts</code>（流式执行、并发控制、synthetic error）、<code class="inline">src/services/tools/toolExecution.ts</code>（runToolUse、schema 校验、权限、hooks、异常转 tool_result）、<code class="inline">src/utils/permissions/permissions.ts</code>、<code class="inline">src/tools/FileEditTool/prompt.ts</code>、<code class="inline">src/tools/FileWriteTool/prompt.ts</code>、<code class="inline">src/services/api/withRetry.ts</code>。</div>
         </section>
 
 
