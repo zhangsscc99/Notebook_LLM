@@ -922,7 +922,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">20 sections</span>
+            <span class="toc-count">21 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -945,6 +945,7 @@
             <a href="#claude-workflow-18-subagent-vs-agentteam-communication">18 · Claude Code subagent 和 Agent Team 里的通信方式有什么区别</a>
             <a href="#claude-workflow-19-agentteam-tasklist-mailbox-sendmessage">19 · Agent Team 里 TaskList、Mailbox、SendMessage 的区别</a>
             <a href="#claude-workflow-20-langgraph-single-agent-two-tool-calls">20 · 用 LangGraph 讲 Claude Code 单 agent 两轮工具调用的 GraphState 和节点流转</a>
+            <a href="#claude-workflow-21-agentteam-tasklist-shared-sync-loop">21 · Agent Team 的 TaskList 是否共享同步、每轮是否先读 mailbox 和 TaskList</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -5928,6 +5929,156 @@ START
 
           <div class="callout">最重要的心智模型：<strong>Claude Code 的单 agent 工作流不是“模型一次想完再执行”，而是“模型每轮只决定下一步；tool_use 触发工具节点；tool_result 回填后再让模型重新判断；直到某轮没有 tool_use 才结束”。</strong> 用 LangGraph 表达，就是一个围绕 <code class="inline">has_tool_use</code> 条件边反复回到 <code class="inline">call_model</code> 的循环图。</div>
           <div class="refs">参考文件：<code class="inline">src/query.ts:204-230</code>（State）、<code class="inline">src/query.ts:545-570</code>（toolUseBlocks 作为流式 tool_use 信号）、<code class="inline">src/query.ts:650-875</code>（模型流式调用并收集 tool_use）、<code class="inline">src/query.ts:1060-1357</code>（没有 tool_use 时收尾/恢复/completed）、<code class="inline">src/query.ts:1380-1420</code>（StreamingToolExecutor/runTools 执行工具）、<code class="inline">src/query.ts:1556-1635</code>（注入 queued command/task notification attachments）、<code class="inline">src/query.ts:1690-1725</code>（构造 next State 并进入下一轮）。</div>
+        </section>
+        <section class="section reveal" id="claude-workflow-21-agentteam-tasklist-shared-sync-loop">
+          <div class="section-header"><div class="index">C21</div><h2>Claude Code Agent Team 的 TaskList 是不是所有 agent 都能访问同步？每个 agent 每轮是不是先读 mailbox 和 TaskList？整个 team 是否围绕最开始的 task 服务？</h2></div>
+          <p>这个问题要分清三件事：<strong>TaskList 的共享访问</strong>、<strong>每个 agent 的取活/消息循环</strong>、<strong>team 的目标边界</strong>。Claude Code 的 Agent Team 不是所有 agent 共享同一个上下文，而是共享一组文件化状态：team config、task list、mailbox、项目文件。</p>
+          <div class="callout"><strong>结论先说：</strong>TaskList 是 team 级共享的，leader 和 teammates 都可以通过 Task 工具读写；但不是每个 agent 每个模型思考轮都强制先读 TaskList。更准确地说：teammate 在空闲等待下一项工作时，会优先检查 mailbox 消息，再检查可领取任务；进入一次具体 agent turn 后，是否再读 TaskList 取决于模型是否调用 TaskList/TaskGet/TaskUpdate。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. TaskList 是 team 级共享的吗？是</h3>
+              <p>是。<code class="inline">TeamCreate</code> 创建 team 时，会同时创建对应 task list 目录。源码里明确是 Team = TaskList，一般路径类似：</p>
+              <pre><code>~/.claude/tasks/{team_name}/</code></pre>
+              <p><code class="inline">getTaskListId()</code> 的解析优先级也说明了这一点：in-process teammate 使用 teammate context 里的 <code class="inline">teamName</code>；process-based teammate 使用 <code class="inline">CLAUDE_CODE_TEAM_NAME</code>；leader 创建 team 后使用 leaderTeamName。这样 leader、tmux/iTerm2 teammate、in-process teammate 都能落到同一个 task list。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>2. 每个 agent 都能写 TaskList 吗？原则上能</h3>
+              <p>只要这个 teammate 的工具池包含 Task 工具，并且权限允许，它就能调用：</p>
+              <ul>
+                <li><code class="inline">TaskCreate</code> 创建新任务。</li>
+                <li><code class="inline">TaskList</code> 查看任务。</li>
+                <li><code class="inline">TaskUpdate</code> 更新 owner、status、blockedBy、blocks 等。</li>
+                <li><code class="inline">TaskGet</code> 查看单个任务。</li>
+              </ul>
+              <p><code class="inline">TeamCreateTool/prompt.ts</code> 也明确写了：任务 ownership 通过 <code class="inline">TaskUpdate(owner)</code> 分配，任何 agent 都可以设置或改变任务 ownership。工程上，任务文件写入有 lock，避免并发写坏。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>3. 同步是什么意思：不是内存同步，是文件状态共享</h3>
+              <p>这里的“同步”不要理解成所有 agent 内存里实时共享同一份状态。更准确是：</p>
+              <ul>
+                <li>TaskList 存在共享任务目录里。</li>
+                <li>每个 agent 调 TaskList/TaskGet 时读取当前文件状态。</li>
+                <li>每个 agent 调 TaskUpdate/TaskCreate 时写入文件。</li>
+                <li>写入后，其他 agent 下次读 TaskList 就能看到。</li>
+              </ul>
+              <p>所以它是“持久化共享状态 + 按需读取”，不是“所有 agent token 上下文自动同步”。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>4. 每个 agent 每轮都先读 mailbox 吗？空闲取活时会</h3>
+              <p>以 in-process teammate 为例，<code class="inline">runInProcessTeammate()</code> 每完成一次工作后会进入 idle，然后调用 <code class="inline">waitForNextPromptOrShutdown()</code> 等下一件事。这个等待循环会：</p>
+              <ol>
+                <li>先检查内存里的 <code class="inline">pendingUserMessages</code>。</li>
+                <li>再读自己的 mailbox。</li>
+                <li>优先处理 shutdown request。</li>
+                <li>再优先处理 team-lead 发来的 unread message。</li>
+                <li>再处理其他 teammate 的 unread message。</li>
+                <li>如果没有消息，再检查 TaskList 里可领取的任务。</li>
+              </ol>
+              <p>所以“每轮先读 mailbox”要精确说成：<strong>teammate 空闲等待下一轮 prompt 时，会轮询 mailbox；但不是模型每一次内部思考前都自动读 mailbox。</strong></p>
+            </article>
+
+            <article class="mini-card">
+              <h3>5. 每个 agent 每轮都先读 TaskList 吗？不是强制</h3>
+              <p>空闲时如果没有 mailbox 消息，in-process runner 会调用 <code class="inline">tryClaimNextTask()</code> 去查 TaskList，找 pending、无 owner、没有未完成依赖阻塞的任务，并尝试 claim。</p>
+              <p>但进入某次具体 agent turn 之后，模型不会被运行时强制在每一轮 tool-use 之前都读 TaskList。它可以根据提示调用 TaskList，也可以直接处理收到的 prompt。Team prompt 只是建议 teammate 定期检查 TaskList，尤其完成任务后检查新任务。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>6. mailbox 和 TaskList 的优先级是什么</h3>
+              <p>从 in-process teammate 的等待循环看，优先级大致是：</p>
+              <pre><code>pendingUserMessages
+  -> mailbox shutdown_request
+  -> mailbox team-lead message
+  -> mailbox peer message
+  -> TaskList available task
+  -> continue polling</code></pre>
+              <p>这很合理：直接消息代表明确通信意图，shutdown request 必须最高优先级；TaskList 是“没有新消息时自己找活干”的共享任务池。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>7. TaskUpdate 分配 owner 后会发生什么</h3>
+              <p><code class="inline">TaskUpdate</code> 如果改变了 owner，在 agent swarms 启用时，会通过 <code class="inline">writeToMailbox()</code> 给新 owner 写一条 <code class="inline">task_assignment</code> 消息。</p>
+              <p>所以分配任务本质上是两件事：</p>
+              <ul>
+                <li>TaskList 里结构化记录：这个 task 的 owner 改了。</li>
+                <li>Mailbox 里异步通知：被分配的人收到一条消息。</li>
+              </ul>
+              <p>这就是为什么 TaskList 和 Mailbox 经常一起出现：TaskList 管事实，Mailbox 管通知。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>8. 整个 Agent Team 是围绕最开始的 task 服务的吗？大体是，但不是硬绑定</h3>
+              <p>team 的最初 prompt / team description 是团队目标的种子。leader 往往围绕这个目标创建 tasks，然后 spawn teammates 分工。实际运行中，team 围绕的是<strong>当前 team context + TaskList 中的任务状态</strong>，而不是只围绕最开始那一句 prompt。</p>
+              <p>teammate 可以创建新任务、修改任务依赖、标记 blocked、向 leader 汇报新发现。也就是说最开始的 task 是起点，不是不可变边界。真正的项目状态逐渐沉淀在 TaskList、mailbox 消息和代码改动里。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>9. 一个具体流程</h3>
+              <pre><code>1. User: 帮我重构登录模块
+2. Leader: TeamCreate("auth-refactor")
+3. Leader: TaskCreate #1 调研登录链路
+4. Leader: TaskCreate #2 修改 token 校验
+5. Leader: TaskCreate #3 补测试
+6. Leader: Agent(name="researcher")
+7. Leader: Agent(name="implementer")
+8. Leader: TaskUpdate #1 owner=researcher
+   -> TaskList 更新 owner
+   -> Mailbox 给 researcher 发 task_assignment
+9. researcher idle loop 读 mailbox
+   -> 收到 task_assignment
+   -> 开始 runAgent 做任务
+10. researcher 完成后 TaskUpdate #1 completed
+    -> SendMessage 给 team-lead 汇报</code></pre>
+              <p>这里所有 agent 都围绕 auth-refactor 这个 team/tasklist 协作，但每个具体行动都由 TaskList 状态和 mailbox 消息驱动。</p>
+            </article>
+
+            <article class="mini-card">
+              <h3>10. 最容易误解的点</h3>
+              <p>不要理解成“每个 agent 每个 token/每个思考步都实时同步读取 TaskList 和 Mailbox”。Claude Code 更工程化：它在<strong>边界点</strong>同步状态：</p>
+              <ul>
+                <li>空闲等待下一项工作时读 mailbox / task list。</li>
+                <li>模型主动调用 TaskList/TaskGet 时读任务状态。</li>
+                <li>模型主动调用 TaskUpdate/TaskCreate 时写任务状态。</li>
+                <li>SendMessage 或 TaskUpdate owner 变化时写 mailbox。</li>
+              </ul>
+              <p>这避免了每轮强制塞大量 team 状态进上下文，也让 agent 只在需要时读取共享状态。</p>
+            </article>
+          </div>
+
+          <pre><code>准确心智模型：
+
+TeamCreate
+  -> 创建 team config
+  -> 创建共享 TaskList 目录
+  -> leader/team members 通过 getTaskListId() 指向同一个 task list
+
+每个 teammate
+  工作中：按模型需要调用 TaskList / TaskUpdate / SendMessage
+  工作完成：进入 idle
+  idle loop：
+    1. pendingUserMessages
+    2. mailbox shutdown_request
+    3. mailbox leader message
+    4. mailbox peer message
+    5. TaskList 可领取任务
+    6. 没有就继续等待
+
+TaskList
+  -> 共享结构化任务状态，不自动进入所有 agent 上下文
+
+Mailbox
+  -> 异步消息/通知队列
+
+整个 team
+  -> 起点是 initial prompt / team description
+  -> 实际运行围绕共享 TaskList + mailbox + 代码状态持续演化</code></pre>
+
+          <div class="callout">最终答案：<strong>TaskList 是 team 共享且可被各 agent 读写的任务状态板；Mailbox 是异步消息队列；每个 agent 不会每次模型思考都强制读两者，但 teammate 空闲取下一项工作时会先读 mailbox，再尝试从 TaskList 领取任务；整个 team 由初始目标启动，但运行中真正围绕共享 TaskList 和消息流推进。</strong></div>
+          <div class="refs">参考文件：<code class="inline">src/utils/tasks.ts</code>（getTaskListId、TaskList 文件读写、claimTask）、<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>（创建 team 和 task list）、<code class="inline">src/tools/TeamCreateTool/prompt.ts</code>（team workflow 和任何 agent 可更新 ownership 的说明）、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/TaskListTool/TaskListTool.ts</code>、<code class="inline">src/tools/TaskUpdateTool/TaskUpdateTool.ts</code>（owner 变化后 mailbox 通知）、<code class="inline">src/tools/TaskGetTool/TaskGetTool.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>（idle loop 先 mailbox 后 task list）、<code class="inline">src/utils/teammateMailbox.ts</code>。</div>
         </section>
 
 
