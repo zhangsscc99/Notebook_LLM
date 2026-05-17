@@ -967,13 +967,14 @@
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">4 sections</span>
+            <span class="toc-count">5 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
             <a href="#claude-tools-argument-format-validation">02 · Claude Code 怎么避免工具调用参数格式错误</a>
             <a href="#claude-tools-selection-scoring-ranking">03 · Claude Code 里多工具都能完成同一子任务时怎么选择，是否有打分或排序模块</a>
             <a href="#claude-tools-permission-control">04 · Claude Code 权限控制怎么做</a>
+            <a href="#claude-tools-deep-dive-source-patterns">05 · Claude Code 十几个工具源码详解：怎么写、怎么优化</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -7095,6 +7096,188 @@ for toolUse in assistant.tool_use_blocks:
 
           <div class="callout">关键心智模型：<strong>Claude Code 权限控制是执行前闸门，不是事后审计。</strong>它把模型意图转成可验证工具调用，再用规则、hook、人类确认、沙箱和多 agent 转交机制决定是否放行。</div>
           <div class="refs">参考文件：<code class="inline">src/services/tools/toolExecution.ts</code>、<code class="inline">src/utils/permissions/permissions.ts</code>、<code class="inline">src/hooks/useCanUseTool.tsx</code>、<code class="inline">src/hooks/toolPermission/handlers/interactiveHandler.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/coordinatorHandler.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/swarmWorkerHandler.ts</code>、<code class="inline">src/utils/permissions/PermissionMode.ts</code>、<code class="inline">src/tools/BashTool/bashPermissions.ts</code>、<code class="inline">src/tools/PowerShellTool/powershellPermissions.ts</code>、<code class="inline">src/utils/sandbox/sandbox-adapter.ts</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-deep-dive-source-patterns">
+          <div class="section-header"><div class="index">CT5</div><h2>Claude Code 十几个工具源码详解：怎么写、怎么优化</h2></div>
+          <p>先给结论：Claude Code 的工具不是一堆随手写的函数，而是一组遵守同一接口的<strong>协议对象</strong>。每个工具都要声明 <code class="inline">name</code>、<code class="inline">inputSchema</code>、<code class="inline">call()</code>、<code class="inline">validateInput()</code>、<code class="inline">checkPermissions()</code>、<code class="inline">mapToolResultToToolResultBlockParam()</code>、是否只读、是否可并发、是否延迟加载等。这样主循环可以统一调度、统一校验、统一权限、统一把结果塞回下一轮模型。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 写工具的核心套路是：<code class="inline">强 schema</code> 控输入，<code class="inline">validateInput</code> 防低级错，<code class="inline">checkPermissions</code> 防越权，<code class="inline">call</code> 做真实动作，<code class="inline">mapToolResult</code> 把结果变成模型可继续推理的 tool_result。</div>
+
+          <p>源码里的统一工具接口大概长这样：</p>
+          <pre><code>// src/Tool.ts，简化版
+export type Tool = {
+  name: string
+  inputSchema: z.ZodType
+  call(args, context, canUseTool, parentMessage, onProgress?): Promise&lt;ToolResult&gt;
+  validateInput?(input, context): Promise&lt;ValidationResult&gt;
+  checkPermissions(input, context): Promise&lt;PermissionResult&gt;
+  isConcurrencySafe(input): boolean
+  isReadOnly(input): boolean
+  shouldDefer?: boolean
+  searchHint?: string
+  maxResultSizeChars: number
+  mapToolResultToToolResultBlockParam(output, toolUseID): ToolResultBlockParam
+}</code></pre>
+
+          <p>下面挑十几个关键工具，按“源码位置 → 怎么写的 → 优化窍门”来记。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. Read / FileReadTool：读文件、图片、PDF、notebook</h3>
+              <p>源码：<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>。输入是 <code class="inline">file_path</code>、<code class="inline">offset</code>、<code class="inline">limit</code>、<code class="inline">pages</code>。输出用 discriminated union 区分 text / image / notebook / pdf / file_unchanged。</p>
+              <p>窍门：它是只读、可并发工具，<code class="inline">maxResultSizeChars = Infinity</code>，因为 Read 自己已经按 token/size 限制输出；再把大结果持久化成文件会形成“Read 读出文件路径再 Read”的循环。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Edit / FileEditTool：精确替换，而不是模糊 patch</h3>
+              <p>源码：<code class="inline">src/tools/FileEditTool/FileEditTool.ts</code>。输入通常是 <code class="inline">file_path</code>、<code class="inline">old_string</code>、<code class="inline">new_string</code>、<code class="inline">replace_all</code>。</p>
+              <p>窍门：先要求 Read，再校验 mtime，避免模型基于过期内容改文件；<code class="inline">old_string</code> 必须能唯一命中，否则返回错误让模型补更多上下文。它还处理 quote normalization、超大文件限制、notebook 改用 NotebookEdit、settings 文件安全校验。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Write / FileWriteTool：创建或覆盖文件</h3>
+              <p>源码：<code class="inline">src/tools/FileWriteTool/FileWriteTool.ts</code>。输入是绝对路径和完整 content；输出包括 create/update、原文件、structuredPatch、gitDiff。</p>
+              <p>窍门：对已存在文件仍要求先 Read，并检查 read timestamp，防止覆盖用户或 linter 刚改过的内容。源码里还复用 stat 结果，避免重复 filesystem call。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. NotebookEdit：notebook 专用编辑</h3>
+              <p>源码：<code class="inline">src/tools/NotebookEditTool/NotebookEditTool.ts</code>。它把 notebook 当 JSON 结构处理，支持 replace / insert / delete cell。</p>
+              <p>窍门：普通 Edit 遇到 <code class="inline">.ipynb</code> 会拒绝，提示用 NotebookEdit。NotebookEdit 也要求 Read-before-Edit 和 mtime 校验，避免 notebook JSON 被盲改。</p>
+            </article>
+          </div>
+
+          <pre><code>// FileEditTool 关键校验，简化版
+if (!readTimestamp || readTimestamp.isPartialView) {
+  return { result: false, message: 'File has not been read yet.' }
+}
+if (lastWriteTime &gt; readTimestamp.timestamp) {
+  return { result: false, message: 'File has been modified since read.' }
+}
+const actualOldString = findActualString(file, old_string)
+if (!actualOldString) return { result: false, message: 'String to replace not found' }
+if (matches &gt; 1 &amp;&amp; !replace_all) return { result: false, message: 'provide more context' }</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>5. BashTool：shell 执行器，但带语义安全层</h3>
+              <p>源码：<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">bashPermissions.ts</code>、<code class="inline">shouldUseSandbox.ts</code>。它不是直接 <code class="inline">spawn(command)</code> 就完事，而是做 read-only 判断、权限、sandbox、后台任务、进度输出、结果截断和 git 操作跟踪。</p>
+              <p>窍门：<code class="inline">isConcurrencySafe()</code> 只在命令被判定只读时返回 true；复合命令会拆成子命令做 hook matcher，避免 <code class="inline">ls &amp;&amp; git push</code> 绕过 <code class="inline">Bash(git *)</code> hook。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. GrepTool：ripgrep 包装器</h3>
+              <p>源码：<code class="inline">src/tools/GrepTool/GrepTool.ts</code>。输入支持 pattern、path、glob、type、output_mode、上下文行、head_limit、offset、multiline。</p>
+              <p>窍门：默认排除 <code class="inline">.git/.svn/.hg/.jj</code> 等 VCS 目录，限制 max columns，默认 <code class="inline">head_limit=250</code>，避免一次 grep 把上下文塞爆。结果路径会相对 cwd，省 token。</p>
+            </article>
+            <article class="mini-card">
+              <h3>7. GlobTool：按文件名找文件</h3>
+              <p>源码：<code class="inline">src/tools/GlobTool/GlobTool.ts</code>。输入是 pattern 和可选 path，输出 filenames、durationMs、numFiles、truncated。</p>
+              <p>窍门：默认最多 100 个结果；只读、可并发；路径不存在会返回带 cwd suggestion 的错误，让模型自己修正路径，而不是直接崩。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. LSPTool：代码智能查询</h3>
+              <p>源码：<code class="inline">src/tools/LSPTool/LSPTool.ts</code>。它支持 definitions、references、symbols、hover 等 LSP 操作，只有 <code class="inline">isLspConnected()</code> 时才启用。</p>
+              <p>窍门：调用前等待 LSP 初始化；文件太大直接返回“too large”；调用 LSP 前确保文件 didOpen。它是 shouldDefer 工具，避免把复杂 schema 过早塞进首轮 prompt。</p>
+            </article>
+          </div>
+
+          <pre><code>// BashTool 关键优化，简化版
+isConcurrencySafe(input) {
+  return this.isReadOnly?.(input) ?? false
+}
+preparePermissionMatcher({ command }) {
+  const parsed = await parseForSecurity(command)
+  if (parsed.kind !== 'simple') return () =&gt; true // 复杂命令 fail-safe
+  const subcommands = parsed.commands.map(c =&gt; c.argv.join(' '))
+  return pattern =&gt; subcommands.some(cmd =&gt; matchWildcardPattern(pattern, cmd))
+}</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>9. ToolSearchTool：工具太多时的“工具发现器”</h3>
+              <p>源码：<code class="inline">src/tools/ToolSearchTool/ToolSearchTool.ts</code>。当工具过多或 MCP 工具 deferred 时，模型先调用 ToolSearch，返回 <code class="inline">tool_reference</code>，再加载真正工具 schema。</p>
+              <p>窍门：它支持 <code class="inline">select:Read,Edit</code> 直选，也支持关键词打分。优化目标不是“替模型选最终工具”，而是减少首轮 prompt 里的工具 schema 体积，保护 prompt cache。</p>
+            </article>
+            <article class="mini-card">
+              <h3>10. AgentTool：启动子 agent / teammate</h3>
+              <p>源码：<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>。它会根据 agent definitions、MCP requirements、permission rules 过滤可用 agent；支持普通 subagent、fork subagent、background、team teammate。</p>
+              <p>窍门：源码里有递归 fork guard、teammate 不能再 spawn teammate、in-process teammate 不能开 background agent 等限制。不是“无限套娃”，而是受团队结构和生命周期约束。</p>
+            </article>
+            <article class="mini-card">
+              <h3>11. SendMessageTool：Agent Team 的消息工具</h3>
+              <p>源码：<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>。它给 teammate 发消息，支持 plain message、broadcast、shutdown_request、plan_approval_response 等结构化消息。</p>
+              <p>窍门：plain message 要求 summary；cross-machine bridge 必须显式 ask，且不允许 structured message 跨 session。目标 agent 如果 stopped，可以从 transcript 自动 resume。</p>
+            </article>
+            <article class="mini-card">
+              <h3>12. TodoWrite / TaskCreate / TaskList：计划状态工具</h3>
+              <p>源码：<code class="inline">TodoWriteTool.ts</code> 和 <code class="inline">TaskCreateTool.ts</code>、<code class="inline">TaskListTool.ts</code>。旧版 TodoWrite 直接更新 appState.todos；TodoV2 用任务表 create/list/update/get。</p>
+              <p>窍门：TodoWrite 在 3 个以上任务全部完成且没有验证项时，会注入 verification nudge，防止模型刚完成 todo 就草率总结。TaskCreate 还会跑 task-created hooks，hook 阻断则回滚创建。</p>
+            </article>
+          </div>
+
+          <pre><code>// ToolSearchTool 返回 tool_reference，简化版
+if (query.startsWith('select:')) {
+  found = requested.map(name =&gt; findToolByName(deferredTools, name))
+}
+return {
+  type: 'tool_result',
+  tool_use_id: toolUseID,
+  content: matches.map(name =&gt; ({ type: 'tool_reference', tool_name: name }))
+}</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>13. WebFetchTool：抓 URL 并转 Markdown</h3>
+              <p>源码：<code class="inline">src/tools/WebFetchTool/WebFetchTool.ts</code>。它校验 URL，按 hostname 做权限规则，预批准 host 可直接 allow，抓取后提取 Markdown。</p>
+              <p>窍门：遇到 redirect 不直接偷偷跟跳，而是返回“请用新 URL 再调一次”的 tool_result；prompt 里固定加入“私有/认证 URL 会失败，优先找 MCP”的提醒，避免 ToolSearch 开关导致 prompt cache 抖动。</p>
+            </article>
+            <article class="mini-card">
+              <h3>14. WebSearchTool：服务端 web search 包装</h3>
+              <p>源码：<code class="inline">src/tools/WebSearchTool/WebSearchTool.ts</code>。它根据 provider / model 判断是否启用，然后内部发起一次模型调用，并挂一个 <code class="inline">web_search</code> tool schema。</p>
+              <p>窍门：有 feature flag 时可用小快模型做搜索；它流式解析 server_tool_use 进度，但 UI 搜索结果不直接进入 transcript search，避免“屏幕上没显示却被索引”的 phantom match。</p>
+            </article>
+            <article class="mini-card">
+              <h3>15. SkillTool：把技能变成工具调用</h3>
+              <p>源码：<code class="inline">src/tools/SkillTool/SkillTool.ts</code>。输入只是 skill 名和可选 args；validate 阶段确认 skill 存在、不是 disableModelInvocation、类型是 prompt。</p>
+              <p>窍门：skill 可以 inline 展开成下一轮 prompt，也可以 <code class="inline">context: fork</code> 跑成 forked sub-agent。源码还记录 skill usage，给后续排序/推荐用。</p>
+            </article>
+            <article class="mini-card">
+              <h3>16. MCPTool / MCP resources：外部工具接入壳</h3>
+              <p>源码：<code class="inline">src/tools/MCPTool/MCPTool.ts</code>、<code class="inline">ListMcpResourcesTool</code>、<code class="inline">ReadMcpResourceTool</code>。基础 MCPTool 是模板，真实 name、description、schema、call 会在 MCP client 连接后按服务端工具覆盖。</p>
+              <p>窍门：MCP 权限默认 passthrough，交给统一权限系统处理；MCP 工具会和 built-in tools 在 <code class="inline">assembleToolPool()</code> 合并、过滤、按名称排序，并用 built-in 优先去重。</p>
+            </article>
+          </div>
+
+          <p>从这些工具可以总结出 Claude Code 写工具的工程窍门：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>工具 schema 要窄。</strong>优先 <code class="inline">z.strictObject</code>，不要让模型传任意参数；参数错就返回可读错误，让下一轮模型修。</div>
+            <div class="flow-step" data-step="2"><strong>读写分离。</strong>Read/Grep/Glob/LSP/WebFetch/WebSearch 标成 read-only + concurrency safe；Edit/Write/Bash 这类风险操作默认串行或受权限控制。</div>
+            <div class="flow-step" data-step="3"><strong>写文件必须防 stale。</strong>Read-before-Edit、mtime、唯一 old_string、文件大小限制、UNC 路径保护，是避免数据损坏的关键。</div>
+            <div class="flow-step" data-step="4"><strong>结果要控 token。</strong>Grep 默认 head_limit，Glob 默认 100，Bash 大输出持久化并只给 preview，Read 用 offset/limit。</div>
+            <div class="flow-step" data-step="5"><strong>工具太多要 deferred。</strong>ToolSearch + <code class="inline">shouldDefer</code> 让首轮 prompt 不被 MCP/LSP/Web 工具 schema 淹没。</div>
+            <div class="flow-step" data-step="6"><strong>权限和 hook matcher 要能解释。</strong>每个工具实现 <code class="inline">getPath</code>、<code class="inline">preparePermissionMatcher</code>、<code class="inline">toAutoClassifierInput</code>，让权限系统、hooks、auto classifier 都能理解这个动作。</div>
+          </div>
+
+          <pre><code>// 写一个 Claude Code 风格工具的骨架
+export const MyTool = buildTool({
+  name: 'my_tool',
+  searchHint: 'short capability phrase',
+  maxResultSizeChars: 100_000,
+  shouldDefer: true,              // schema 大或低频工具建议 deferred
+  strict: true,
+  get inputSchema() { return z.strictObject({ path: z.string() }) },
+  isReadOnly() { return true },
+  isConcurrencySafe() { return true },
+  async validateInput(input, context) { /* 低级错误、路径、大小、状态 */ },
+  async checkPermissions(input, context) { /* allow / ask / deny */ },
+  async call(input, context, canUseTool, parentMessage, onProgress) {
+    return { data: await doWork(input) }
+  },
+  mapToolResultToToolResultBlockParam(output, toolUseID) {
+    return { type: 'tool_result', tool_use_id: toolUseID, content: serialize(output) }
+  }
+})</code></pre>
+
+          <div class="callout">最短记法：<strong>Claude Code 的好工具 = schema 小而硬、执行前校验足、权限边界清楚、结果可压缩、错误可回传、只读工具可并发、重工具 deferred。</strong>这就是它工具系统稳定的主要原因。</div>
+          <div class="refs">参考文件：<code class="inline">src/Tool.ts</code>、<code class="inline">src/tools.ts</code>、<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/tools/FileEditTool/FileEditTool.ts</code>、<code class="inline">src/tools/FileWriteTool/FileWriteTool.ts</code>、<code class="inline">src/tools/NotebookEditTool/NotebookEditTool.ts</code>、<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">src/tools/GrepTool/GrepTool.ts</code>、<code class="inline">src/tools/GlobTool/GlobTool.ts</code>、<code class="inline">src/tools/LSPTool/LSPTool.ts</code>、<code class="inline">src/tools/ToolSearchTool/ToolSearchTool.ts</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>、<code class="inline">src/tools/TodoWriteTool/TodoWriteTool.ts</code>、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/WebFetchTool/WebFetchTool.ts</code>、<code class="inline">src/tools/WebSearchTool/WebSearchTool.ts</code>、<code class="inline">src/tools/SkillTool/SkillTool.ts</code>、<code class="inline">src/tools/MCPTool/MCPTool.ts</code>。</div>
         </section>
 
 
