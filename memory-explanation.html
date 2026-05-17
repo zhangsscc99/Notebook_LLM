@@ -962,10 +962,11 @@
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
+            <a href="#claude-tools-argument-format-validation">02 · Claude Code 怎么避免工具调用参数格式错误</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -6499,6 +6500,118 @@ tool_result 返回给 Claude</code></pre>
 
           <div class="callout">最重要的心智模型：<strong>Claude Code 的工具系统不是“工具执行器”，而是一个可纠错的模型-工具协议层。</strong> 它让模型用 tool_use 表达意图，让运行时用 schema、权限、并发、安全、hook 和错误 tool_result 把意图变成可审计、可恢复的工程动作。</div>
           <div class="refs">参考文件：<code class="inline">src/tools.ts</code>（工具注册、过滤、MCP 合并）、<code class="inline">src/Tool.ts</code>（Tool 接口和 buildTool 默认行为）、<code class="inline">src/query.ts</code>（tool_use 主循环、recovery、缺失 tool_result 补齐）、<code class="inline">src/services/tools/toolOrchestration.ts</code>（按并发安全分批调度）、<code class="inline">src/services/tools/StreamingToolExecutor.ts</code>（流式执行、并发控制、synthetic error）、<code class="inline">src/services/tools/toolExecution.ts</code>（runToolUse、schema 校验、权限、hooks、异常转 tool_result）、<code class="inline">src/utils/permissions/permissions.ts</code>、<code class="inline">src/tools/FileEditTool/prompt.ts</code>、<code class="inline">src/tools/FileWriteTool/prompt.ts</code>、<code class="inline">src/services/api/withRetry.ts</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-argument-format-validation">
+          <div class="section-header"><div class="index">CT2</div><h2>Claude Code 怎么避免工具调用参数格式错误</h2></div>
+          <p>Claude Code 避免工具参数格式错误不是靠一句 prompt 提醒模型“请输出正确 JSON”。源码里它做成了一条完整防线：<strong>先把每个工具的 Zod schema 转成 API tool schema 约束模型输出，再在本地用同一套 schema 二次校验；错了不执行工具，而是返回带具体原因的错误 tool_result，让下一轮模型修正。</strong></p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 把“参数格式正确”从模型自觉行为，变成了 <code class="inline">schema 约束 → 本地 parse → 工具级 validate → 错误回传重试</code> 的协议闭环。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 每个工具先声明强类型输入</h3>
+              <p><code class="inline">src/Tool.ts</code> 定义统一 <code class="inline">Tool</code> 接口，每个工具都有 <code class="inline">inputSchema</code>。大部分内置工具用 <code class="inline">z.strictObject(...)</code> 定义参数，例如 <code class="inline">Bash</code> 必须有 <code class="inline">command</code>，<code class="inline">Read</code> 必须有 <code class="inline">file_path</code>，<code class="inline">Edit</code> 必须有 <code class="inline">file_path</code>、<code class="inline">old_string</code>、<code class="inline">new_string</code>。</p>
+              <p><code class="inline">strictObject</code> 的意义是：不仅缺字段会错，多出来的未知字段也会错。这样模型不能随便塞一个 <code class="inline">path</code>、<code class="inline">filename</code>、<code class="inline">args</code> 之类的非 schema 字段蒙混过关。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 发给模型的是 JSON Schema</h3>
+              <p>每次请求模型前，<code class="inline">src/services/api/claude.ts</code> 会构造 <code class="inline">toolSchemas</code>；具体转换在 <code class="inline">src/utils/api.ts</code> 的 <code class="inline">toolToAPISchema()</code>。</p>
+              <p>如果工具没有手写 <code class="inline">inputJSONSchema</code>，就调用 <code class="inline">zodToJsonSchema(tool.inputSchema)</code>，把 Zod schema 转成 Anthropic API 的 <code class="inline">input_schema</code>。这一步让模型在 tool_use 阶段就知道每个工具需要哪些字段、字段类型是什么。</p>
+            </article>
+          </div>
+
+          <p>完整链路可以按这个顺序理解：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">工具作者在工具文件里写 <code class="inline">inputSchema = z.strictObject(...)</code>。</div>
+            <div class="flow-step" data-step="2"><code class="inline">toolToAPISchema()</code> 把 <code class="inline">inputSchema</code> 转成 API <code class="inline">input_schema</code>，随请求发给模型。</div>
+            <div class="flow-step" data-step="3">模型返回 <code class="inline">assistant.tool_use</code>，里面有 <code class="inline">name</code>、<code class="inline">id</code>、<code class="inline">input</code>。</div>
+            <div class="flow-step" data-step="4"><code class="inline">runToolUse()</code> 找工具名；找不到就返回 <code class="inline">No such tool</code> 的错误 <code class="inline">tool_result</code>。</div>
+            <div class="flow-step" data-step="5"><code class="inline">checkPermissionsAndCallTool()</code> 先执行 <code class="inline">tool.inputSchema.safeParse(input)</code>。</div>
+            <div class="flow-step" data-step="6">schema parse 失败：不进权限、不执行工具，直接返回 <code class="inline">InputValidationError</code>。</div>
+            <div class="flow-step" data-step="7">schema parse 成功后，才进入 <code class="inline">tool.validateInput()</code>、权限、hooks 和真正 <code class="inline">tool.call()</code>。</div>
+          </div>
+
+          <pre><code>模型输出：
+ToolUse(name="Read", input={ "path": "src/index.ts" })
+
+Claude Code 本地执行：
+tool = findToolByName(tools, "Read")
+parsed = tool.inputSchema.safeParse(input)
+
+if (!parsed.success):
+  return tool_result(
+    is_error=true,
+    content="&lt;tool_use_error&gt;InputValidationError: The required parameter `file_path` is missing; An unexpected parameter `path` was provided&lt;/tool_use_error&gt;"
+  )
+
+// 只有 parsed.success 才会继续：
+validateInput(parsed.data)
+checkPermissions(parsed.data)
+tool.call(parsed.data)</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>3. 错误信息专门做成模型可读</h3>
+              <p><code class="inline">src/utils/toolErrors.ts</code> 的 <code class="inline">formatZodValidationError()</code> 会把 Zod 原始错误整理成 LLM 更容易修正的句子：缺少哪个 required parameter、哪个参数是 unexpected、哪个参数类型应该是什么但实际给了什么。</p>
+              <p>所以模型下一轮看到的不是一坨难读的 Zod stack，而是类似：<code class="inline">The required parameter `file_path` is missing</code>、<code class="inline">An unexpected parameter `path` was provided</code>、<code class="inline">expected string but provided number</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. schema 错误会闭合 tool_use 协议</h3>
+              <p>即使参数错了，Claude Code 也不会简单抛异常结束。它会构造一个 user message，里面包含同一个 <code class="inline">tool_use_id</code> 对应的 <code class="inline">tool_result</code>，并且标记 <code class="inline">is_error: true</code>。</p>
+              <p>这点很重要：Anthropic API 要求 assistant 的 <code class="inline">tool_use</code> 后面必须有匹配的 <code class="inline">tool_result</code>。Claude Code 用错误结果把协议闭合，下一轮模型才能继续，而不是整个会话因为消息结构非法崩掉。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. schema 通过后还有语义校验</h3>
+              <p><code class="inline">safeParse</code> 只管“形状对不对”。比如字段名、类型、是否多字段。每个工具自己的 <code class="inline">validateInput()</code> 继续检查“值能不能用”。</p>
+              <p>例子：<code class="inline">Read</code> 会检查文件路径和读取限制；<code class="inline">Edit</code> 会检查文件是否存在、是否读过、<code class="inline">old_string</code> 是否唯一匹配；<code class="inline">Bash</code> 会检查 timeout、后台任务、平台策略等。这些失败也会变成错误 <code class="inline">tool_result</code> 返回给模型。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. strict tool 进一步约束模型</h3>
+              <p><code class="inline">Tool</code> 接口里有 <code class="inline">strict?: boolean</code>。如果 feature gate 开启、工具声明 <code class="inline">strict: true</code>、模型支持 structured outputs，<code class="inline">toolToAPISchema()</code> 会给 API schema 加 <code class="inline">strict: true</code>。</p>
+              <p>源码里 <code class="inline">Bash</code>、<code class="inline">Read</code>、<code class="inline">Write</code>、<code class="inline">Edit</code>、<code class="inline">TodoWrite</code>、<code class="inline">Grep</code>、<code class="inline">PowerShell</code> 等都有 strict 倾向。作用是让模型在生成参数时更贴近 schema，而不是等本地报错再重试。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>7. 流式 tool input 也会归一化</h3>
+              <p>开启 fine-grained tool streaming 时，API 可能以 <code class="inline">input_json_delta</code> 形式逐步返回工具参数。<code class="inline">messages.ts</code> 会把字符串形式的 tool input 解析成对象；如果 JSON 解析失败，会记录 <code class="inline">tengu_tool_input_json_parse_fail</code>，并退化成空对象，让后续 schema 校验给出明确缺参错误。</p>
+              <p>这比“半截 JSON 直接执行”安全得多：解析不出来就不执行，最终还是落到统一的 <code class="inline">safeParse → InputValidationError</code> 路径。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. 工具输入会做有限 normalize</h3>
+              <p><code class="inline">normalizeToolInput()</code> 会对少数工具做兼容修正：比如 Bash 去掉重复的 <code class="inline">cd cwd &amp;&amp;</code> 前缀；FileEdit 统一旧格式；TaskOutput 兼容历史参数名。</p>
+              <p>但这不是放任模型乱写参数。源码注释也写了 <code class="inline">TODO: Generalize this to all tools</code>，说明 normalize 是少量兼容层；真正的安全边界仍然是 schema parse 和工具级 validate。</p>
+            </article>
+            <article class="mini-card">
+              <h3>9. 动态工具没 schema 时会提示先加载</h3>
+              <p>ToolSearch / deferred tool 场景下，有些 MCP 或延迟加载工具的完整 schema 可能还没发给模型。<code class="inline">buildSchemaNotSentHint()</code> 会检测这种情况。</p>
+              <p>如果因为没拿到 schema 导致数组、数字、布尔值被模型当字符串输出，错误信息会追加提示：先调用 <code class="inline">ToolSearch</code> 加载该工具 schema，再重试。这样避免模型在不知道完整参数结构时盲猜。</p>
+            </article>
+            <article class="mini-card">
+              <h3>10. UI 渲染也不信任未解析输入</h3>
+              <p><code class="inline">AssistantToolUseMessage.tsx</code> 渲染工具调用时也会 <code class="inline">tool.inputSchema.safeParse(param.input)</code>。如果 parse 不过，就不把错误输入当成正常工具 UI 展示。</p>
+              <p>这属于防御性设计：执行层不信任模型输入，展示层也不信任模型输入，避免 UI 因为半成品参数或错误字段崩掉。</p>
+            </article>
+          </div>
+
+          <p>所以参数格式错误的恢复过程不是“Claude Code 帮模型偷偷改对”，而是更工程化的闭环：</p>
+          <pre><code>第一次：模型错调
+Read({ "path": "src/index.ts" })
+
+本地：schema 拒绝
+InputValidationError:
+- required `file_path` missing
+- unexpected `path` provided
+
+第二次：模型读错误结果后修正
+Read({ "file_path": "src/index.ts" })
+
+本地：schema 通过 → validateInput 通过 → 权限通过 → 执行 Read</code></pre>
+
+          <div class="callout">最短总结：<strong>Claude Code 防参数格式错误靠四件事：工具 schema 前置给模型、本地 Zod 二次校验、错误 tool_result 反馈可修正原因、下一轮模型按错误重试。</strong> 它不假设模型永远会写对参数，而是把“写错了也能安全纠正”做进工具协议。</div>
+          <div class="refs">参考文件：<code class="inline">src/Tool.ts</code>（Tool 接口、inputSchema、strict、validateInput）、<code class="inline">src/utils/api.ts</code>（toolToAPISchema、normalizeToolInput、normalizeToolInputForAPI）、<code class="inline">src/utils/zodToJsonSchema.ts</code>（Zod 转 JSON Schema）、<code class="inline">src/services/api/claude.ts</code>（每轮构造 toolSchemas）、<code class="inline">src/services/tools/toolExecution.ts</code>（runToolUse、safeParse、InputValidationError、buildSchemaNotSentHint）、<code class="inline">src/services/tools/toolOrchestration.ts</code>（调度前也用 safeParse 判断并发安全）、<code class="inline">src/services/tools/StreamingToolExecutor.ts</code>（流式工具执行时也先找工具和 parse）、<code class="inline">src/utils/toolErrors.ts</code>（formatZodValidationError）、<code class="inline">src/utils/messages.ts</code>（流式 input_json_delta 解析和 tool input normalize）、<code class="inline">src/components/messages/AssistantToolUseMessage.tsx</code>（展示层 safeParse）。</div>
         </section>
 
 
