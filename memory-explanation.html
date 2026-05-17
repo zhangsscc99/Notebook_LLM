@@ -931,7 +931,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">21 sections</span>
+            <span class="toc-count">22 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -955,6 +955,7 @@
             <a href="#claude-workflow-19-agentteam-tasklist-mailbox-sendmessage">19 · Agent Team 里 TaskList、Mailbox、SendMessage 的区别</a>
             <a href="#claude-workflow-20-langgraph-single-agent-two-tool-calls">20 · 用 LangGraph 讲 Claude Code 单 agent 两轮工具调用的 GraphState 和节点流转</a>
             <a href="#claude-workflow-21-agentteam-tasklist-shared-sync-loop">21 · Agent Team 的 TaskList 是否共享同步、每轮是否先读 mailbox 和 TaskList</a>
+            <a href="#claude-workflow-22-context-compression">22 · Claude Code 怎么做上下文压缩</a>
           </div>
         </details>
         <details class="toc-group" id="claudeToolsTocGroup" open>
@@ -6177,6 +6178,120 @@ Mailbox
 
           <div class="callout">最终答案：<strong>TaskList 是 team 共享且可被各 agent 读写的任务状态板；Mailbox 是异步消息队列；每个 agent 不会每次模型思考都强制读两者，但 teammate 空闲取下一项工作时会先读 mailbox，再尝试从 TaskList 领取任务；整个 team 由初始目标启动，但运行中真正围绕共享 TaskList 和消息流推进。</strong></div>
           <div class="refs">参考文件：<code class="inline">src/utils/tasks.ts</code>（getTaskListId、TaskList 文件读写、claimTask）、<code class="inline">src/tools/TeamCreateTool/TeamCreateTool.ts</code>（创建 team 和 task list）、<code class="inline">src/tools/TeamCreateTool/prompt.ts</code>（team workflow 和任何 agent 可更新 ownership 的说明）、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/TaskListTool/TaskListTool.ts</code>、<code class="inline">src/tools/TaskUpdateTool/TaskUpdateTool.ts</code>（owner 变化后 mailbox 通知）、<code class="inline">src/tools/TaskGetTool/TaskGetTool.ts</code>、<code class="inline">src/utils/swarm/inProcessRunner.ts</code>（idle loop 先 mailbox 后 task list）、<code class="inline">src/utils/teammateMailbox.ts</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-22-context-compression">
+          <div class="section-header"><div class="index">C22</div><h2>Claude Code 怎么做上下文压缩</h2></div>
+          <p>Claude Code 的上下文压缩不是简单“把历史消息删掉”。它是一套分层机制：<strong>小压缩先清理工具结果，大压缩再让模型生成会话摘要；压缩后还要重建能继续工作的上下文</strong>，包括最近消息、文件状态、plan mode、skills、MCP 指令、agent 列表、hooks 结果等。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 压缩上下文的目标不是最小 token，而是“丢掉旧细节，但保留继续干活所需的任务状态、代码线索和运行时协议闭合”。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 压缩入口有三类</h3>
+              <p><strong>手动压缩：</strong><code class="inline">/compact</code> 命令在 <code class="inline">src/commands/compact/index.ts</code> 注册，实际执行在 <code class="inline">src/commands/compact/compact.ts</code>。用户也可以附加自定义 summarization instructions。</p>
+              <p><strong>自动压缩：</strong><code class="inline">query.ts</code> 每轮模型调用前会跑 <code class="inline">deps.autocompact()</code>，也就是 <code class="inline">autoCompactIfNeeded()</code>。</p>
+              <p><strong>失败后补救压缩：</strong>当 API 返回 prompt-too-long / 媒体过大等可恢复错误时，<code class="inline">query.ts</code> 会尝试 context collapse drain 或 reactive compact，再重试当前 turn。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 自动触发阈值怎么定</h3>
+              <p><code class="inline">autoCompact.ts</code> 先算有效上下文窗口：模型总 context window 减去给摘要输出预留的 token，最多预留 <code class="inline">20,000</code> tokens。自动压缩阈值大致是 <code class="inline">effectiveWindow - 13,000</code>。</p>
+              <p>如果关闭 auto compact，则有 hard blocking limit，并额外给手动 <code class="inline">/compact</code> 预留 <code class="inline">3,000</code> tokens，避免上下文满到连压缩命令都跑不了。</p>
+            </article>
+          </div>
+
+          <p>在真正调用模型前，Claude Code 的上下文管理顺序大概是：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><code class="inline">getMessagesAfterCompactBoundary()</code>：先从最近一次 compact boundary 之后的消息开始，旧压缩段不再原样进入模型。</div>
+            <div class="flow-step" data-step="2"><code class="inline">applyToolResultBudget()</code>：限制单条/累计工具结果的上下文占用，超大结果可替换成引用。</div>
+            <div class="flow-step" data-step="3">可选 <code class="inline">snipCompact</code>：对历史做更轻量的裁剪。</div>
+            <div class="flow-step" data-step="4"><code class="inline">microcompactMessages()</code>：先做微压缩，主要处理旧工具结果，而不是整段会话摘要。</div>
+            <div class="flow-step" data-step="5">可选 <code class="inline">contextCollapse.applyCollapsesIfNeeded()</code>：把可折叠的上下文投影成更小视图。</div>
+            <div class="flow-step" data-step="6"><code class="inline">autoCompactIfNeeded()</code>：如果 token 超阈值，进入真正的 conversation compact。</div>
+            <div class="flow-step" data-step="7">压缩成功后用 <code class="inline">buildPostCompactMessages()</code> 替换当前 <code class="inline">messagesForQuery</code>，然后继续本轮模型调用。</div>
+          </div>
+
+          <pre><code>query.ts 每轮模型调用前：
+messagesForQuery = getMessagesAfterCompactBoundary(messages)
+messagesForQuery = applyToolResultBudget(messagesForQuery)
+messagesForQuery = snipCompactIfNeeded(messagesForQuery)
+messagesForQuery = microcompactMessages(messagesForQuery)
+messagesForQuery = contextCollapse.applyCollapsesIfNeeded(messagesForQuery)
+compactionResult = autoCompactIfNeeded(messagesForQuery)
+if compactionResult:
+  postCompactMessages = buildPostCompactMessages(compactionResult)
+  messagesForQuery = postCompactMessages
+callModel(messagesForQuery)</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>3. microcompact：先压工具结果</h3>
+              <p><code class="inline">microCompact.ts</code> 只关注一批 compactable tools：<code class="inline">Read</code>、shell、<code class="inline">Grep</code>、<code class="inline">Glob</code>、<code class="inline">WebSearch</code>、<code class="inline">WebFetch</code>、<code class="inline">Edit</code>、<code class="inline">Write</code> 等。</p>
+              <p>它有两种思路：cached microcompact 通过 API cache editing 删除旧 tool result 的缓存引用，尽量不改本地消息；time-based microcompact 在缓存已经冷掉时，把旧 tool_result 内容替换成 <code class="inline">[Old tool result content cleared]</code>，但保留最近 N 个工具结果。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. compactConversation：真正生成摘要</h3>
+              <p><code class="inline">compactConversation()</code> 会跑一个 forked summarization agent，请模型生成详细摘要。摘要 prompt 在 <code class="inline">services/compact/prompt.ts</code>，明确要求保留用户意图、技术概念、文件和代码片段、错误与修复、待办、当前工作和下一步。</p>
+              <p>压缩模型被要求<strong>只输出文本，不允许调用工具</strong>，避免 summary turn 又触发工具调用。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. 压缩前先清洗输入</h3>
+              <p>压缩前会处理一些高风险上下文：图片和 document 会被替换成 <code class="inline">[image]</code> / <code class="inline">[document]</code>，避免摘要请求本身因为媒体过大失败；skill discovery / listing 这类后续会重新注入的 attachment 也会被剥掉，避免污染摘要。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. 压缩后不是只留下 summary</h3>
+              <p><code class="inline">buildPostCompactMessages()</code> 的顺序是：<code class="inline">boundaryMarker</code>、<code class="inline">summaryMessages</code>、<code class="inline">messagesToKeep</code>、<code class="inline">attachments</code>、<code class="inline">hookResults</code>。也就是说摘要只是核心之一，后面还会恢复关键运行状态。</p>
+            </article>
+          </div>
+
+          <p>压缩后重建上下文时，Claude Code 会补回这些东西：</p>
+          <div class="grid-2">
+            <article class="mini-card"><h3>最近读过的文件</h3><p>压缩前保存 <code class="inline">readFileState</code>，压缩后用 <code class="inline">createPostCompactFileAttachments()</code> 尽量恢复最多 5 个重要文件，总预算约 50k，每个文件约 5k。太大的文件会变成引用，提示需要时重新 Read。</p></article>
+            <article class="mini-card"><h3>Plan / Plan Mode</h3><p>如果当前有 plan 文件或处在 plan mode，会生成 plan attachment / plan mode attachment，保证压缩后模型还知道自己不能直接执行实现，或者知道当前计划状态。</p></article>
+            <article class="mini-card"><h3>Skills / Tools / MCP</h3><p>被调用过的 skills 会作为 attachment 保留；deferred tools、agent listing、MCP instructions 会重新做 delta announcement，因为旧的 attachment 可能已经被摘要吃掉。</p></article>
+            <article class="mini-card"><h3>Hooks 和 SessionStart</h3><p>压缩前跑 <code class="inline">PreCompact</code> hooks，压缩后跑 <code class="inline">SessionStart</code> hooks 和 <code class="inline">PostCompact</code> hooks。用户或项目可以通过 hooks 注入“压缩时必须保留什么”。</p></article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>7. Session Memory Compact：用外部会话记忆替代重新总结</h3>
+              <p>如果 feature flag / env 打开，<code class="inline">trySessionMemoryCompaction()</code> 会优先使用已经抽取好的 session memory 内容，而不是重新把整个历史交给 summarizer。它会保留上次 summarized message 之后的 recent messages，并按配置保证至少约 <code class="inline">10k</code> tokens、至少 5 条文本消息，最多约 <code class="inline">40k</code> tokens。</p>
+              <p>这里还有关键安全处理：<code class="inline">adjustIndexToPreserveAPIInvariants()</code> 会把保留窗口往前扩，避免切断 <code class="inline">tool_use/tool_result</code> 对，或者切掉同一个 assistant message id 里的 thinking block。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. Partial Compact：选一段压缩</h3>
+              <p><code class="inline">partialCompactConversation()</code> 支持按 pivot 做局部压缩：<code class="inline">up_to</code> 表示压缩前半段、保留后半段；<code class="inline">from</code> 表示保留前半段、压缩后半段。它会在 boundary 上标注 preserved segment，方便 transcript/resume 重新链接。</p>
+            </article>
+            <article class="mini-card">
+              <h3>9. 失败恢复：压缩请求自己太长怎么办</h3>
+              <p>如果 compact summarization 这个请求本身也 prompt-too-long，<code class="inline">truncateHeadForPTLRetry()</code> 会按 API round 分组，从最旧的组开始丢弃，最多重试 3 次，并插入 <code class="inline">[earlier conversation truncated for compaction retry]</code> 标记，避免用户卡死。</p>
+            </article>
+            <article class="mini-card">
+              <h3>10. 自动压缩失败不会无限重试</h3>
+              <p><code class="inline">autoCompactIfNeeded()</code> 有 circuit breaker：连续失败达到 3 次后，本 session 后续会跳过无意义的自动压缩，避免每轮都浪费 API 调用。</p>
+            </article>
+          </div>
+
+          <p>一个具体例子：</p>
+          <pre><code>你让 Claude Code 改一个大型项目：
+1. 前 30 轮里 Read/Grep/Bash 产生大量 tool_result
+2. microcompact 先清理旧工具结果，只保留最近关键结果
+3. token 仍接近阈值，autoCompact 触发
+4. compactConversation 让模型总结旧对话：
+   - 用户到底要什么
+   - 改了哪些文件
+   - 关键 bug / 修复
+   - 当前还剩什么任务
+5. 压缩后上下文变成：
+   compact boundary
+   + 详细 summary
+   + 最近未总结的消息
+   + 最近重要文件 attachment
+   + plan/skills/MCP/tool delta
+6. 下一轮模型不再看到完整 30 轮历史，
+   但能继续知道任务目标、代码状态和下一步。</code></pre>
+
+          <div class="callout">最短总结：<strong>Claude Code 的上下文压缩是“摘要 + 保留最近窗口 + 恢复运行时附件 + 保护工具协议”的组合。</strong> 它不是粗暴截断；真正复杂的地方在于压缩后还要让 agent 能安全继续工作。</div>
+          <div class="refs">参考文件：<code class="inline">src/query.ts</code>（压缩链路、auto compact、prompt-too-long/reactive recovery）、<code class="inline">src/commands/compact/index.ts</code>、<code class="inline">src/commands/compact/compact.ts</code>（/compact 命令）、<code class="inline">src/services/compact/autoCompact.ts</code>（阈值、自动触发、失败熔断）、<code class="inline">src/services/compact/compact.ts</code>（compactConversation、partialCompactConversation、post compact messages）、<code class="inline">src/services/compact/prompt.ts</code>（摘要 prompt）、<code class="inline">src/services/compact/microCompact.ts</code>（工具结果微压缩）、<code class="inline">src/services/compact/sessionMemoryCompact.ts</code>（session memory compact）、<code class="inline">src/services/compact/postCompactCleanup.ts</code>。</div>
         </section>
 
         <section class="section reveal" id="claude-tools-overview-scheduling-recovery">
