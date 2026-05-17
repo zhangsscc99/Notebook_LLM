@@ -910,11 +910,12 @@
         <details class="toc-group" id="openclawGatewayTocGroup" open>
           <summary>
             <span class="toc-group-title">OpenClaw Gateway</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#openclaw-gateway-overview">01 · OpenClaw 的网关到底是干什么的</a>
             <a href="#openclaw-gateway-communication">02 · OpenClaw 的通信方式</a>
+            <a href="#openclaw-gateway-agent-to-agent-communication">03 · OpenClaw 的 agent 之间是什么通信方式</a>
           </div>
         </details>
         <details class="toc-group" id="joyAgentTocGroup" open>
@@ -2185,6 +2186,86 @@ Telegram / iMessage
 
           <div class="callout">记忆方式：<strong>RPC 负责“发命令”，Event 负责“看过程”，Channel 负责“接外部平台”，sessionKey 负责“找到会话”，lastRoute 负责“把结果送回去”。</strong></div>
           <div class="refs">参考：<code class="inline">packages/sdk/src/client.ts</code>、<code class="inline">packages/sdk/src/transport.ts</code>、<code class="inline">packages/sdk/src/event-hub.ts</code>、<code class="inline">packages/sdk/src/types.ts</code>、<code class="inline">src/gateway/client.ts</code>、<code class="inline">src/gateway/server*</code>、<code class="inline">src/channels/turn/kernel.ts</code>、<code class="inline">src/channels/message/send.ts</code>、<code class="inline">docs/channels/channel-routing.md</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="openclaw-gateway-agent-to-agent-communication">
+          <div class="section-header"><div class="index">G3</div><h2>OpenClaw 的 agent 之间是什么通信方式</h2></div>
+          <p>OpenClaw 里的 agent 之间不是直接开一个 socket 互相聊天，也不是共享同一个模型上下文。源码里更准确的说法是：<strong>agent-to-agent 通信是基于 Gateway / session tools 的跨 session 消息路由</strong>。每个 agent 仍然有自己的 <code class="inline">agentId</code>、workspace、auth、session store；通信时通过 <code class="inline">sessions_send</code>、<code class="inline">sessions_spawn</code>、<code class="inline">sessions_yield</code>、<code class="inline">subagents</code> 这些工具把消息或任务交给另一个 session。</p>
+          <div class="callout"><strong>一句话：</strong>OpenClaw agent 之间的通信方式是“工具调用驱动的跨 session 消息传递 + Gateway 调度 + transcript / task registry 记录”，不是模型之间的私有内存共享，也不是 P2P 网络通信。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 多 agent 先是隔离对象</h3>
+              <p><code class="inline">docs/concepts/multi-agent.md</code> 里把 agent 定义成完整作用域：workspace、<code class="inline">agentDir</code>、auth profiles、model registry、session store。默认每个 agent 的会话历史在 <code class="inline">~/.openclaw/agents/&lt;agentId&gt;/sessions</code> 下分开。</p>
+              <p>所以“agent 之间通信”不是天然共享上下文；必须通过显式 session 工具或 Gateway 路由发生。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 同级 agent：sessions_send</h3>
+              <p><code class="inline">sessions_send</code> 是最像“发消息给另一个 agent”的工具。调用方给出 <code class="inline">sessionKey</code> 或 label，运行时解析目标 session，然后通过 Gateway 启动目标 session 的一次 agent run。</p>
+              <p>接收方看到的不是普通用户消息，而是带 provenance 的 inter-session data，例如提示里会标成 <code class="inline">[Inter-session message ...]</code>，transcript 里也会记录来源工具。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 父子 agent：sessions_spawn</h3>
+              <p><code class="inline">sessions_spawn</code> 用于创建子 agent / sub-agent。它会返回 <code class="inline">runId</code> 和 <code class="inline">childSessionKey</code>，典型 key 类似 <code class="inline">agent:main:subagent:&lt;uuid&gt;</code>。</p>
+              <p>子 agent 在自己的 session 里跑，完成后通过 task completion / announce path 把结果交回请求者。父 agent 如果要等结果，应该用 <code class="inline">sessions_yield</code> 结束当前 turn，等完成事件回来，而不是轮询。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 运行时通信，不是共享记忆</h3>
+              <p>跨 agent 消息会进入目标 session 的 transcript，并通过 Gateway / agent runtime 触发模型回合。它不是把 A agent 的完整上下文复制到 B agent，除非 spawn 时显式选择 <code class="inline">context: "fork"</code>。</p>
+              <p>默认子 agent 可以是 isolated clean session；需要继承当前对话时才 fork。</p>
+            </article>
+          </div>
+
+          <p>最典型的同级 agent 通信流程：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">Agent A 的模型决定要咨询 Agent B，发出 <code class="inline">sessions_send</code> tool call。</div>
+            <div class="flow-step" data-step="2"><code class="inline">sessions_send-tool.ts</code> 校验 target、visibility、agent-to-agent policy 和 sandbox 限制。</div>
+            <div class="flow-step" data-step="3">运行时把消息包装成 inter-session prompt，设置 <code class="inline">sourceTool: "sessions_send"</code>、<code class="inline">sourceSessionKey</code>、目标 <code class="inline">sessionKey</code>。</div>
+            <div class="flow-step" data-step="4">Gateway 用 <code class="inline">startAgentRun</code> / <code class="inline">agent</code> 路径唤起 Agent B 的 session。</div>
+            <div class="flow-step" data-step="5">Agent B 生成回复；如果调用方设置等待，结果可以 inline 返回给 Agent A。</div>
+            <div class="flow-step" data-step="6">如果需要可见交付，<code class="inline">runSessionsSendA2AFlow()</code> 会做 bounded ping-pong，再让目标 agent 生成 announce message 发回 channel。</div>
+          </div>
+
+          <pre><code>Agent A
+  → tool_use: sessions_send({ sessionKey: "agent:reviewer:main", message: "请 review 这个设计" })
+  → permission / visibility / A2A policy check
+  → Gateway injects inter-session message into Agent B session
+  → Agent B runs one turn and writes transcript
+  → optional wait returns reply to Agent A
+  → optional A2A ping-pong, max session.agentToAgent.maxPingPongTurns
+  → announce delivery to visible channel if needed</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>A2A 权限开关</h3>
+              <p>跨 agent 访问不默认无限开放。<code class="inline">createAgentToAgentPolicy()</code> 会看 <code class="inline">tools.agentToAgent.enabled</code> 和 <code class="inline">tools.agentToAgent.allow</code>。跨 agent send / history / status / list 都会受这个策略影响。</p>
+            </article>
+            <article class="mini-card">
+              <h3>可见性范围</h3>
+              <p><code class="inline">tools.sessions.visibility</code> 支持 <code class="inline">self</code>、<code class="inline">tree</code>、<code class="inline">agent</code>、<code class="inline">all</code>。跨 agent 通常需要 <code class="inline">all</code>；默认是 <code class="inline">tree</code>，即当前 session 和它生成的子树。</p>
+            </article>
+            <article class="mini-card">
+              <h3>沙箱会收紧范围</h3>
+              <p>sandboxed session 的 session tools 会被 clamp 到更窄范围，默认只能看 spawned/tree 范围，避免沙箱里的 agent 借跨 session 工具越权访问其他 agent。</p>
+            </article>
+            <article class="mini-card">
+              <h3>ping-pong 是有上限的</h3>
+              <p><code class="inline">session.agentToAgent.maxPingPongTurns</code> 控制 A2A 往返轮数，默认 5，源码上限 20。接收方也可以回复 <code class="inline">REPLY_SKIP</code> 停止继续互发。</p>
+            </article>
+          </div>
+
+          <p>父子 agent 通信要和同级通信区分开：</p>
+          <pre><code>父 agent 需要并行研究
+  → sessions_spawn({ task: "查 X", agentId: "researcher", context: "isolated" })
+  → 返回 runId + childSessionKey，父 agent 不阻塞
+  → 子 agent 独立跑，写自己的 transcript
+  → 父 agent 调 sessions_yield 等完成事件
+  → completion announce 把子结果作为运行时事件交回父会话
+  → 父 agent 汇总后回复用户</code></pre>
+
+          <div class="callout">最重要的判断：<strong>OpenClaw 的 agent 通信本质是 session 层通信。</strong>同级 agent 用 <code class="inline">sessions_send</code>；父子委派用 <code class="inline">sessions_spawn</code> + <code class="inline">sessions_yield</code>；状态管理用 task registry / transcript；跨 agent 可见性由 <code class="inline">tools.sessions.visibility</code> 和 <code class="inline">tools.agentToAgent</code> 控制。</div>
+          <div class="refs">参考：<code class="inline">docs/concepts/session-tool.md</code>、<code class="inline">docs/tools/subagents.md</code>、<code class="inline">docs/concepts/multi-agent.md</code>、<code class="inline">src/agents/tools/sessions-send-tool.ts</code>、<code class="inline">src/agents/tools/sessions-send-tool.a2a.ts</code>、<code class="inline">src/agents/tools/sessions-send-helpers.ts</code>、<code class="inline">src/plugin-sdk/session-visibility.ts</code>、<code class="inline">src/agents/pi-tools.policy.ts</code></div>
         </section>
 
 
