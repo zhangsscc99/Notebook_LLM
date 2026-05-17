@@ -5034,74 +5034,105 @@ print(answer)</code></pre>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
           <div class="section-header"><div class="index">ALG1</div><h2>embedding 模型和 reranker 模型原理是什么</h2></div>
-          <p><strong>embedding 模型</strong>和<strong>reranker 模型</strong>都是检索/RAG 系统里的核心组件，但它们解决的问题不一样：embedding 负责“快速从海量文本里召回一批可能相关的候选”；reranker 负责“在候选里更精细地重新排序，把真正最相关的放前面”。</p>
-          <div class="callout"><strong>一句话：</strong>embedding 是<strong>粗筛</strong>，把文本压成向量后做相似度搜索；reranker 是<strong>精排</strong>，直接看“query + 文档”的完整交互关系，判断这篇文档到底有多相关。</div>
+          <p>这里不要先从 RAG 应用讲，而要从<strong>模型结构和训练目标</strong>讲。embedding 模型和 reranker 模型本质上都是把“文本相关性”变成可学习的函数，但它们建模方式不同：embedding 模型学的是<strong>独立编码后的向量空间</strong>；reranker 模型学的是<strong>query 和 document 放在一起后的交互匹配函数</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>embedding 模型通常是 <strong>bi-encoder / dual-encoder</strong>：query 和 doc 分开编码，再算向量相似度；reranker 通常是 <strong>cross-encoder</strong>：query 和 doc 拼在一起进 Transformer，让注意力层直接建模两者 token 之间的交互，然后输出相关性分数。</div>
 
           <div class="grid-2">
             <article class="mini-card">
-              <h3>1. embedding 模型在做什么</h3>
-              <p>embedding 模型会把一句话、一段文本、一个代码块变成一个固定长度的向量，比如 768 维、1024 维、1536 维。这个向量不是给人看的，而是给机器算距离用的。</p>
-              <p>理想效果是：语义相近的文本，向量距离近；语义不相关的文本，向量距离远。例如“怎么重置密码”和“忘记密码怎么办”会靠得近，即使字面不完全一样。</p>
+              <h3>1. embedding 模型的模型结构</h3>
+              <p>典型 embedding 模型是一个 Transformer encoder。输入文本经过 tokenizer 变成 token ids，再经过多层 self-attention 和 MLP，得到每个 token 的 hidden state。</p>
+              <p>最后需要一个 pooling 操作把 token-level 表示变成 sentence-level / passage-level 向量。常见做法有：取 <code class="inline">[CLS]</code> 向量、mean pooling、last token pooling，或者专门训练一个 projection head。</p>
             </article>
             <article class="mini-card">
-              <h3>2. embedding 怎么训练出来</h3>
-              <p>常见训练目标是对比学习：给模型一个 query、一个正样本文档、若干负样本文档。模型要学会让 query 向量更靠近正样本，更远离负样本。</p>
-              <p>训练后，模型不是直接输出答案，而是输出“语义坐标”。这些坐标可以提前算好，放进向量数据库或本地 ANN 索引里。</p>
+              <h3>2. 为什么叫 bi-encoder</h3>
+              <p>bi-encoder 的意思是 query 和 document 分开进模型：</p>
+              <pre><code>q_vec = Encoder(query)
+d_vec = Encoder(document)
+score = cosine(q_vec, d_vec) 或 dot(q_vec, d_vec)</code></pre>
+              <p>这里的 Encoder 可以共享参数，也可以 query encoder / doc encoder 分开。现在很多通用 embedding 模型会共享一个 encoder。</p>
             </article>
             <article class="mini-card">
-              <h3>3. reranker 模型在做什么</h3>
-              <p>reranker 不负责从几百万文档里直接搜索。它通常接收 query 和已经召回的候选文档，比如 top 50 或 top 100，然后逐个判断相关性，输出分数。</p>
-              <p>它的输入通常是成对的：<code class="inline">[query, document]</code>。模型能同时看到问题和文档内容，所以可以判断更细的匹配关系：是否真正回答问题、是否只是关键词重合、是否缺少关键条件。</p>
+              <h3>3. embedding 学到的是什么</h3>
+              <p>它学到的是一个语义向量空间。训练目标不是让模型生成文字，而是让相关文本在向量空间里靠近，不相关文本远离。</p>
+              <p>如果做了 L2 normalize，那么向量都落在单位球面上，dot product 等价于 cosine similarity。模型训练本质上是在塑造这个球面上的语义几何结构。</p>
             </article>
             <article class="mini-card">
-              <h3>4. reranker 为什么更准但更慢</h3>
-              <p>embedding 可以提前把文档向量全部算好，查询时只需要算 query 向量，再做近邻搜索，所以很快。</p>
-              <p>reranker 必须在查询发生后，把 query 和每个候选文档一起送进模型。每个候选都要跑一次或一批推理，所以算力成本更高，但排序质量通常更好。</p>
+              <h3>4. embedding 的核心损失函数</h3>
+              <p>最常见的是 contrastive learning / InfoNCE。给定一个 query、一个正样本 document 和多个负样本 document，目标是让正样本分数最高：</p>
+              <pre><code>sim(q, d) = q · d / temperature
+loss = -log exp(sim(q, d+)) / Σ exp(sim(q, di))</code></pre>
+              <p>这里 temperature 控制分布尖锐程度；in-batch negatives 会把同一 batch 里其他样本的正例当成当前 query 的负例，训练效率很高。</p>
             </article>
           </div>
 
-          <p>一个标准 RAG 检索链路通常是这样：</p>
+          <p>embedding 模型训练时，关键不是“背知识”，而是<strong>构造正负样本关系</strong>：</p>
           <div class="flow">
-            <div class="flow-step" data-step="1"><strong>离线建库。</strong>把文档切 chunk，然后用 embedding 模型把每个 chunk 编码成向量，写入向量库。</div>
-            <div class="flow-step" data-step="2"><strong>线上查询。</strong>用户问题进来后，也用同一个 embedding 模型编码成 query 向量。</div>
-            <div class="flow-step" data-step="3"><strong>粗召回。</strong>向量库用余弦相似度、点积或 L2 距离找 topK chunk，比如先取 50 条。</div>
-            <div class="flow-step" data-step="4"><strong>精排序。</strong>reranker 对这 50 条逐条打分，选出最相关的 top 5。</div>
-            <div class="flow-step" data-step="5"><strong>生成答案。</strong>把 top 5 放进 LLM 上下文，让 LLM 基于这些证据回答。</div>
+            <div class="flow-step" data-step="1"><strong>正样本。</strong>query 和真正相关的 passage、问句和答案、标题和正文、相似句对、点击日志里的 clicked document，都可以构成正样本。</div>
+            <div class="flow-step" data-step="2"><strong>随机负样本。</strong>从语料里随机抽不相关文档，简单但太容易，模型很快学会。</div>
+            <div class="flow-step" data-step="3"><strong>hard negative。</strong>字面很像但语义不对的文档。它们最能提升 embedding 模型，因为模型必须学会细粒度区分。</div>
+            <div class="flow-step" data-step="4"><strong>蒸馏。</strong>用更强的 cross-encoder/reranker 给候选打分，再把这些分数蒸馏给 embedding 模型，让双塔模型逼近交叉编码器的排序能力。</div>
           </div>
 
           <div class="grid-2">
             <article class="mini-card">
-              <h3>embedding 的优势</h3>
-              <p>快、便宜、可扩展。适合百万级、千万级文档召回。它解决的是“从大海里先捞一网鱼”。</p>
+              <h3>5. reranker 的模型结构</h3>
+              <p>reranker 通常是 cross-encoder。它不是分别编码 query 和 document，而是把两者拼成一个序列：</p>
+              <pre><code>[CLS] query tokens [SEP] document tokens [SEP]</code></pre>
+              <p>然后整个序列一起进 Transformer。self-attention 允许 query token 直接 attend 到 document token，也允许 document token 反向 attend query token。</p>
             </article>
             <article class="mini-card">
-              <h3>embedding 的瓶颈</h3>
-              <p>它把整段文本压成一个向量，细节会丢。遇到否定、数字条件、时间条件、多跳关系、关键词相同但语义不同的情况，可能召回或排序不准。</p>
+              <h3>6. reranker 输出什么</h3>
+              <p>reranker 通常在 <code class="inline">[CLS]</code> hidden state 上接一个线性层，输出一个相关性分数：</p>
+              <pre><code>h_cls = CrossEncoder(query, document)[CLS]
+score = Linear(h_cls)</code></pre>
+              <p>如果是分类式 reranker，输出可以是 relevant / irrelevant 的 logits；如果是排序式 reranker，输出就是一个实数 relevance score。</p>
             </article>
             <article class="mini-card">
-              <h3>reranker 的优势</h3>
-              <p>它能看 query 和 document 的细粒度交互，所以更擅长判断“这段是否真的回答了这个问题”。适合提升 topK 质量。</p>
+              <h3>7. reranker 为什么更强</h3>
+              <p>因为 cross-attention 能建模 token 级别交互。比如 query 里有“2020 年之前”“不是美国”“第二任 CEO”，reranker 可以逐 token 检查文档是否满足这些约束。</p>
+              <p>embedding 模型必须把整段文本压成一个向量，很多细节会被压缩掉；reranker 不需要提前压缩成单向量，所以表达能力更强。</p>
             </article>
             <article class="mini-card">
-              <h3>reranker 的瓶颈</h3>
-              <p>慢、贵、不能直接扫全库。它必须依赖前面的召回阶段。如果 embedding 没把正确文档召回来，reranker 后面也救不了。</p>
+              <h3>8. reranker 的核心损失函数</h3>
+              <p>常见训练方式有三类：</p>
+              <pre><code>Pointwise:  BCE(score(q,d), label)
+Pairwise:   max(0, margin - score(q,d+) + score(q,d-))
+Listwise:   softmax(scores) 对齐理想排序分布</code></pre>
+              <p>pointwise 学“相关/不相关”；pairwise 学“正样本要排在负样本前”；listwise 学“一组候选的整体排序”。</p>
             </article>
           </div>
 
-          <p>两者的本质区别可以这样记：</p>
-          <pre><code>embedding 模型：
-query -> 向量
-文档 -> 向量
-相似度(query_vector, doc_vector) -> 粗略相关性
+          <p>两者最本质的算法差异是<strong>相似度函数是否可分解</strong>：</p>
+          <pre><code>embedding / bi-encoder:
+score(q, d) = sim(f(q), f(d))
+特点：q 和 d 可以独立编码，文档向量可预计算。
+代价：q-d 细粒度 token 交互弱。
 
-reranker 模型：
-(query, 文档) -> 模型一起阅读 -> 相关性分数
+reranker / cross-encoder:
+score(q, d) = g(q, d)
+特点：q 和 d 必须一起进模型，注意力层直接建模交互。
+代价：每个 query-document pair 都要重新前向计算。</code></pre>
 
-所以：
-embedding = 双塔 / bi-encoder / 适合召回
-reranker = 交叉编码 / cross-encoder / 适合精排</code></pre>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>embedding 的算法瓶颈</h3>
+              <p>最大瓶颈是信息瓶颈：一段文档无论多复杂，最后都要压成一个固定维度向量。否定关系、数字条件、长距离依赖、多实体关系容易损失。</p>
+            </article>
+            <article class="mini-card">
+              <h3>reranker 的算法瓶颈</h3>
+              <p>最大瓶颈是计算复杂度。cross-encoder 的 self-attention 是对拼接后的 token 序列做交互，序列越长越贵；而且不能离线预计算所有文档的最终分数。</p>
+            </article>
+            <article class="mini-card">
+              <h3>中间路线：late interaction</h3>
+              <p>ColBERT 这类模型介于两者之间：query 和 doc 仍可分别编码成 token vectors，但打分时保留 token-level 最大相似度交互。它比纯 embedding 准，比 full cross-encoder 快。</p>
+            </article>
+            <article class="mini-card">
+              <h3>模型能力排序</h3>
+              <p>粗略看：bi-encoder 最快但交互最弱；late interaction 居中；cross-encoder 最准但最慢。这个差异来自模型结构，不是来自工程封装。</p>
+            </article>
+          </div>
 
-          <div class="callout">最短总结：<strong>embedding 模型决定“能不能把可能相关的资料捞出来”，reranker 模型决定“捞出来后谁最应该排前面”。</strong>实际系统里通常不是二选一，而是 embedding 先召回，再用 reranker 精排。</div>
+          <div class="callout">最短总结：<strong>embedding 模型学一个可检索的向量空间，reranker 模型学一个更精细的相关性判别函数。</strong>embedding 的核心是对比学习和向量几何；reranker 的核心是 cross-attention 和排序损失。前者牺牲交互换速度，后者牺牲速度换判断精度。</div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
