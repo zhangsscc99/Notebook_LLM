@@ -967,7 +967,7 @@
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">5 sections</span>
+            <span class="toc-count">6 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
@@ -975,6 +975,7 @@
             <a href="#claude-tools-selection-scoring-ranking">03 · Claude Code 里多工具都能完成同一子任务时怎么选择，是否有打分或排序模块</a>
             <a href="#claude-tools-permission-control">04 · Claude Code 权限控制怎么做</a>
             <a href="#claude-tools-deep-dive-source-patterns">05 · Claude Code 十几个工具源码详解：怎么写、怎么优化</a>
+            <a href="#claude-tools-grep-glob-read-layered-limits">06 · Claude Code 的 Grep / Glob / Read 等工具具体有哪些，读取限制和分层读取怎么做</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -7278,6 +7279,120 @@ export const MyTool = buildTool({
 
           <div class="callout">最短记法：<strong>Claude Code 的好工具 = schema 小而硬、执行前校验足、权限边界清楚、结果可压缩、错误可回传、只读工具可并发、重工具 deferred。</strong>这就是它工具系统稳定的主要原因。</div>
           <div class="refs">参考文件：<code class="inline">src/Tool.ts</code>、<code class="inline">src/tools.ts</code>、<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/tools/FileEditTool/FileEditTool.ts</code>、<code class="inline">src/tools/FileWriteTool/FileWriteTool.ts</code>、<code class="inline">src/tools/NotebookEditTool/NotebookEditTool.ts</code>、<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">src/tools/GrepTool/GrepTool.ts</code>、<code class="inline">src/tools/GlobTool/GlobTool.ts</code>、<code class="inline">src/tools/LSPTool/LSPTool.ts</code>、<code class="inline">src/tools/ToolSearchTool/ToolSearchTool.ts</code>、<code class="inline">src/tools/AgentTool/AgentTool.tsx</code>、<code class="inline">src/tools/SendMessageTool/SendMessageTool.ts</code>、<code class="inline">src/tools/TodoWriteTool/TodoWriteTool.ts</code>、<code class="inline">src/tools/TaskCreateTool/TaskCreateTool.ts</code>、<code class="inline">src/tools/WebFetchTool/WebFetchTool.ts</code>、<code class="inline">src/tools/WebSearchTool/WebSearchTool.ts</code>、<code class="inline">src/tools/SkillTool/SkillTool.ts</code>、<code class="inline">src/tools/MCPTool/MCPTool.ts</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-grep-glob-read-layered-limits">
+          <div class="section-header"><div class="index">CT6</div><h2>Claude Code 的 Grep / Glob / Read 等工具具体有哪些，读取限制和分层读取怎么做</h2></div>
+          <p>Claude Code 里跟“找文件、搜内容、读文件”最相关的工具主要是 <strong>Glob、Grep、Read</strong>，再加上辅助性的 <strong>Bash、LSP、NotebookEdit</strong>。源码设计很明确：<strong>先用轻量工具缩小范围，再用 Read 精确读取片段</strong>。它不是鼓励模型一上来把大文件全读进上下文。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 的文件理解链路是 <code class="inline">Glob 找文件 → Grep 搜内容 → Read 读命中片段 → Edit/Write 修改</code>。读取有行数、字节、token、PDF 页数、图片 token 预算等多层限制；所谓“分层读取”主要是工具能力 + prompt 引导 + offset/limit 支持共同实现。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. Glob：按文件名/路径模式找文件</h3>
+              <p>源码：<code class="inline">src/tools/GlobTool/GlobTool.ts</code>。输入是 <code class="inline">pattern</code> 和可选 <code class="inline">path</code>，输出是匹配文件列表、耗时、数量、是否截断。</p>
+              <p>优化：默认最多返回 <code class="inline">100</code> 个结果；路径会转成相对 cwd，减少 token；路径不存在时返回 cwd suggestion，方便模型纠错。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Grep：按内容正则搜索</h3>
+              <p>源码：<code class="inline">src/tools/GrepTool/GrepTool.ts</code>。底层包装 ripgrep，支持 <code class="inline">pattern</code>、<code class="inline">path</code>、<code class="inline">glob</code>、<code class="inline">type</code>、<code class="inline">output_mode</code>、上下文行、<code class="inline">head_limit</code>、<code class="inline">offset</code>、<code class="inline">multiline</code>。</p>
+              <p>优化：默认排除 <code class="inline">.git/.svn/.hg/.bzr/.jj/.sl</code>，限制 <code class="inline">--max-columns 500</code>，默认 <code class="inline">head_limit=250</code>，并先分页再做路径相对化，避免对会被丢弃的海量结果做多余处理。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Read：真正读文件内容</h3>
+              <p>源码：<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/utils/readFileInRange.ts</code>。输入是绝对 <code class="inline">file_path</code>，可选 <code class="inline">offset</code>、<code class="inline">limit</code>、PDF <code class="inline">pages</code>。</p>
+              <p>优化：默认从头最多读 <code class="inline">2000</code> 行；提示里明确让模型对长文件使用 offset/limit。文本读取后会带行号，方便下一步 Edit 精确定位。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Bash / LSP 是补充，不是首选读取</h3>
+              <p>Bash 可以跑 <code class="inline">ls</code>、<code class="inline">cat</code>、<code class="inline">sed</code>、<code class="inline">rg</code>，但系统提示更偏向专用工具：读文件用 Read，搜内容用 Grep，找文件用 Glob。LSPTool 则用于 definitions / references / symbols / hover 这类代码智能查询。</p>
+              <p>优化：专用工具有结构化 schema、权限、截断、相对路径、错误恢复；裸 Bash 输出更难控 token，所以不是默认首选。</p>
+            </article>
+          </div>
+
+          <p>它的“分层读取”可以按这个顺序理解：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先定位文件集合。</strong>不知道文件名时用 <code class="inline">Glob</code>，例如 <code class="inline">**/*Tool.ts</code>。</div>
+            <div class="flow-step" data-step="2"><strong>再定位内容命中。</strong>知道关键词/函数名时用 <code class="inline">Grep</code>，默认只返回文件名或有限内容，避免大面积读文件。</div>
+            <div class="flow-step" data-step="3"><strong>再读小片段。</strong>Grep 给出文件和行号后，用 <code class="inline">Read({ offset, limit })</code> 读附近几十到几百行。</div>
+            <div class="flow-step" data-step="4"><strong>需要修改时先保证已读。</strong>Edit / Write 会检查 readFileState 和 mtime，没读过或文件变化过就拒绝，要求重新 Read。</div>
+            <div class="flow-step" data-step="5"><strong>特殊文件走专门路径。</strong>图片走压缩和 token budget；PDF 大文件走 pages；notebook 返回 cells，太大时提示用 jq 分段读。</div>
+          </div>
+
+          <pre><code>典型源码阅读流程：
+Glob({ pattern: "src/tools/**/*Tool.ts" })
+  ↓ 找到候选文件
+Grep({ pattern: "readFileInRange", path: "src", output_mode: "content", "-n": true, head_limit: 20 })
+  ↓ 拿到具体文件和行号
+Read({ file_path: "/repo/src/utils/readFileInRange.ts", offset: 1, limit: 180 })
+  ↓ 理解实现
+Read({ file_path: "/repo/src/tools/FileReadTool/FileReadTool.ts", offset: 1000, limit: 120 })
+  ↓ 只读相关片段，不把整文件塞进上下文</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Read 的行数限制</h3>
+              <p><code class="inline">prompt.ts</code> 里写了默认最多读取 <code class="inline">MAX_LINES_TO_READ = 2000</code> 行，从文件开头开始。用户或模型可以传 <code class="inline">offset</code> 和 <code class="inline">limit</code> 做分段读取。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Read 的字节限制</h3>
+              <p><code class="inline">limits.ts</code> 里默认 <code class="inline">maxSizeBytes</code> 走 <code class="inline">MAX_OUTPUT_SIZE</code>，注释说明默认大约 <code class="inline">256 KB</code>。注意它默认检查的是总文件大小；超了会报错，提示用 offset/limit 或 search，而不是直接塞 25K token。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Read 的 token 限制</h3>
+              <p>默认 <code class="inline">DEFAULT_MAX_OUTPUT_TOKENS = 25000</code>。源码先粗略估算，接近阈值才调用 API count tokens；超过就抛 <code class="inline">MaxFileReadTokenExceededError</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>重复读取去重</h3>
+              <p>Read 会把已读文件范围记录进 <code class="inline">readFileState</code>。如果同一文件同一范围未变化，再读时返回 <code class="inline">file_unchanged</code> stub，让模型引用之前的 Read 结果，减少重复上下文。</p>
+            </article>
+          </div>
+
+          <p><code class="inline">readFileInRange.ts</code> 里还有一个很关键的底层优化：它确实有“分层/分路径读取”的实现。</p>
+          <pre><code>// src/utils/readFileInRange.ts，简化理解
+if (regular file && size &lt; 10MB) {
+  // fast path：一次 readFile，内存里按行切片
+  read whole file → split lines → return [offset, offset + limit)
+} else {
+  // streaming path：大文件/管道/设备走流式扫描
+  createReadStream → 手动找 \n → 只累积目标行范围
+  // 范围外只计数 totalLines，不保存内容，避免读 100GB 文件爆内存
+}</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Fast path：小文件快读</h3>
+              <p>普通文件小于 <code class="inline">10MB</code> 时，直接 <code class="inline">readFile()</code> 后按行切片。源码注释说这样比 stream 少 per-chunk async overhead，对常见源码文件大约更快。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Streaming path：大文件安全读</h3>
+              <p>大文件、pipe、device 等走 <code class="inline">createReadStream</code>。它只累积 offset/limit 范围内的行，范围外丢弃，只统计 totalLines / bytes。这个就是防止大文件读取撑爆 RSS 的关键。</p>
+            </article>
+            <article class="mini-card">
+              <h3>PDF 分页限制</h3>
+              <p>PDF 支持 <code class="inline">pages</code>，格式如 <code class="inline">1-5</code>。大 PDF 超过阈值会要求指定页码；每次最多 <code class="inline">PDF_MAX_PAGES_PER_READ</code>，源码提示最大 20 页。</p>
+            </article>
+            <article class="mini-card">
+              <h3>图片 token budget</h3>
+              <p>图片不是按文本 maxSizeBytes 处理，而是读取一次后 resize / downsample；如果估算 token 超预算，再从同一 buffer 做更激进压缩，避免重复读文件。</p>
+            </article>
+          </div>
+
+          <p>Grep / Glob 本身也有结果限制：</p>
+          <pre><code>Grep:
+- output_mode 默认 files_with_matches
+- content / count / files_with_matches 都支持 head_limit + offset
+- head_limit 未指定默认 250；传 0 才是 unlimited
+- --max-columns 500 防止 minified/base64 行污染输出
+- files_with_matches 会按 mtime 新到旧排序，再 head_limit
+
+Glob:
+- 默认 maxResults = 100
+- 返回 truncated=true 时提示缩小 path 或 pattern
+- 只读、可并发、结果路径相对 cwd</code></pre>
+
+          <div class="callout">回答你的问题：<strong>是的，读取有限制；也有分层读取。</strong>限制包括 Read 默认 2000 行、约 256KB 文件大小门槛、25000 token 输出门槛、PDF 20 页、Glob 100 结果、Grep 默认 250 结果。分层读取不是一个叫“LayeredReader”的单独模块，而是 <code class="inline">Glob/Grep 先缩小范围 + Read offset/limit 分段 + readFileInRange fast/stream 双路径 + dedup/file_unchanged</code> 共同组成的工程策略。</div>
+          <div class="refs">参考文件：<code class="inline">src/tools/GlobTool/GlobTool.ts</code>、<code class="inline">src/tools/GrepTool/GrepTool.ts</code>、<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/tools/FileReadTool/limits.ts</code>、<code class="inline">src/tools/FileReadTool/prompt.ts</code>、<code class="inline">src/utils/readFileInRange.ts</code>、<code class="inline">src/tools/LSPTool/LSPTool.ts</code>、<code class="inline">src/tools/BashTool/BashTool.tsx</code>。</div>
         </section>
 
 
