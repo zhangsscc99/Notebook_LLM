@@ -867,7 +867,7 @@
         <details class="toc-group" id="memoryTocGroup">
           <summary>
             <span class="toc-group-title">OpenClaw Memory</span>
-            <span class="toc-count">34 sections</span>
+            <span class="toc-count">35 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#s1">01 · 本质是什么</a>
@@ -904,15 +904,17 @@
             <a href="#s32">32 · RAG 后会不会读完整相关内容</a>
             <a href="#s33">33 · search 如何映射回原始 Markdown</a>
             <a href="#s34">34 · 分层记忆和会话怎么记住</a>
+            <a href="#s35">35 · OpenClaw 记忆系统的更新和遗忘</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
           <summary>
             <span class="toc-group-title">OpenClaw Gateway</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#openclaw-gateway-overview">01 · OpenClaw 的网关到底是干什么的</a>
+            <a href="#openclaw-gateway-communication">02 · OpenClaw 的通信方式</a>
           </div>
         </details>
         <details class="toc-group" id="joyAgentTocGroup" open>
@@ -931,7 +933,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">23 sections</span>
+            <span class="toc-count">25 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -957,17 +959,20 @@
             <a href="#claude-workflow-21-agentteam-tasklist-shared-sync-loop">21 · Agent Team 的 TaskList 是否共享同步、每轮是否先读 mailbox 和 TaskList</a>
             <a href="#claude-workflow-22-context-compression">22 · Claude Code 怎么做上下文压缩</a>
             <a href="#claude-workflow-23-sandbox">23 · Claude Code 的沙箱怎么做的</a>
+            <a href="#claude-workflow-24-harness">24 · Claude Code 的 harness 是什么</a>
+            <a href="#claude-workflow-25-reflection">25 · Claude Code 的 reflection 怎么做</a>
           </div>
         </details>
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">4 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
             <a href="#claude-tools-argument-format-validation">02 · Claude Code 怎么避免工具调用参数格式错误</a>
             <a href="#claude-tools-selection-scoring-ranking">03 · Claude Code 里多工具都能完成同一子任务时怎么选择，是否有打分或排序模块</a>
+            <a href="#claude-tools-permission-control">04 · Claude Code 权限控制怎么做</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -1971,6 +1976,80 @@ memory_get({
           <div class="refs">参考：<code class="inline">docs/concepts/session.md</code>、<code class="inline">docs/concepts/agent.md</code>、<code class="inline">docs/reference/memory-config.md</code>、<code class="inline">docs/concepts/memory-qmd.md</code>、<code class="inline">packages/memory-host-sdk/src/host/session-files.ts</code>、<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code></div>
         </section>
 
+        <section class="section reveal" id="s35">
+          <div class="section-header"><div class="index">35</div><h2>OpenClaw 记忆系统的更新和遗忘</h2></div>
+          <p>OpenClaw 的记忆更新不是“模型脑子里自动长出一条记忆”，而是<strong>文件源 → watcher / sync → chunk → index → search</strong> 的工程链路。长期记忆的真实源头通常是 workspace 里的 <code class="inline">MEMORY.md</code>、<code class="inline">memory/*.md</code>、extraPaths，以及可选的 session transcript。</p>
+          <div class="callout"><strong>一句话：</strong>OpenClaw 的“更新”主要是源文件变化后重新索引；“遗忘”主要是源文件删除/修改后清理索引、旧记忆分数衰减、预算压缩时丢弃自动晋升片段。默认不是让 LLM 自己随意删除记忆。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 更新从文件变化开始</h3>
+              <p><code class="inline">MemoryManagerSyncOps.ensureWatcher()</code> 会监听 <code class="inline">MEMORY.md</code>、<code class="inline">memory/</code> 和 extra paths。文件 <code class="inline">add/change/unlink/unlinkDir</code> 后会标 dirty，并触发延迟 sync。</p>
+              <p>sync 时会重新列出 memory files，读取 path、mtime、size、hash、content。hash 没变的文件跳过；新文件或内容变化的文件才重新切块、embedding、写入索引。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 索引层怎么替换旧内容</h3>
+              <p>每个 memory 文件会形成 file entry 和 chunks。文件内容变了以后，旧 chunks 会被替换；文件不再存在时，<code class="inline">syncMemoryFiles()</code> 会把 stale rows 从 files、chunks、vector table、FTS table 里删掉。</p>
+              <p>所以索引不是永久累积垃圾。真正的 source of truth 是 Markdown / transcript；索引只是为了检索加速和排序。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 会话记忆是增量进入的</h3>
+              <p>session transcript 更新会触发 <code class="inline">onSessionTranscriptUpdate()</code>，经过 debounce 和 delta 阈值后再同步。源码里会避免每写一行 JSONL 都立即重建索引。</p>
+              <p><code class="inline">.jsonl.reset.*</code>、<code class="inline">.jsonl.deleted.*</code> 这类归档文件会作为一次性 dirty event 处理，用于让 session memory 搜索知道会话被 reset / delete 过。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 忘记不是神秘能力</h3>
+              <p>OpenClaw 的“忘记”首先是可审计的文件操作：你删除某个 Markdown 文件，或者删掉里面一段内容，下一次 sync 后对应 chunks 会从索引里消失。</p>
+              <p>这比“让模型自己决定遗忘”更工程化，因为你能在 Git / 文件系统里看到到底删除了什么。</p>
+            </article>
+          </div>
+
+          <p>可以按这个流程记：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">用户、hook、session-memory 或人工编辑写入 <code class="inline">MEMORY.md</code> / <code class="inline">memory/*.md</code>。</div>
+            <div class="flow-step" data-step="2">chokidar watcher 捕获 add/change/unlink，标记 memory dirty。</div>
+            <div class="flow-step" data-step="3"><code class="inline">syncMemoryFiles()</code> 列文件、算 hash，只处理新增或变化文件。</div>
+            <div class="flow-step" data-step="4"><code class="inline">indexFile()</code> 把 Markdown 切成 chunks，写 SQLite / vector / FTS 或 QMD 后端。</div>
+            <div class="flow-step" data-step="5">文件被删除或不再属于 active paths 时，旧 file/chunk/vector/FTS 行被 prune。</div>
+            <div class="flow-step" data-step="6">之后 <code class="inline">memory_search</code> 只能召回当前索引里仍然存在、仍然得分够高的内容。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>时间衰减：降低旧 dated memory 权重</h3>
+              <p><code class="inline">temporal-decay.ts</code> 负责按半衰期降低旧记忆分数，默认半衰期约 30 天，而且默认可关闭。重要点：evergreen 路径，例如 <code class="inline">MEMORY.md</code> 或非日期 memory 文件，不会像 daily memory 那样自然衰减。</p>
+            </article>
+            <article class="mini-card">
+              <h3>预算压缩：只裁自动晋升区</h3>
+              <p><code class="inline">memory-budget.ts</code> 做 bounded <code class="inline">MEMORY.md</code> compaction。它主要删除最老的 <code class="inline">Promoted From Short-Term Memory</code> 自动晋升段，尽量保留用户手写内容。</p>
+            </article>
+            <article class="mini-card">
+              <h3>短期到长期：靠召回统计晋升</h3>
+              <p><code class="inline">short-term-promotion.ts</code> 会记录 recallCount、dailyCount、groundedCount、query hashes、concept tags 等。达到阈值后，频繁被用到的短期片段才会晋升进长期 Markdown。</p>
+            </article>
+            <article class="mini-card">
+              <h3>session-memory hook：reset 时落一份摘要</h3>
+              <p>内置 <code class="inline">session-memory</code> hook 会在 <code class="inline">/new</code> 或 <code class="inline">/reset</code> 时，把最近若干轮对话保存到 <code class="inline">workspace/memory/YYYY-MM-DD-HHMM.md</code>，作为可索引的长期材料。</p>
+            </article>
+          </div>
+
+          <pre><code>修改 memory/idea.md
+  → watcher 标 dirty
+  → syncMemoryFiles()
+  → hash 变化，重建该文件 chunks
+  → search 命中新内容
+
+删除 memory/old.md
+  → watcher 标 dirty
+  → active paths 里没有 old.md
+  → prune stale file/chunks/vector/FTS
+  → search 不再召回 old.md</code></pre>
+
+          <div class="callout">核心结论：OpenClaw 记忆系统的可信点在于“文件可编辑、索引可重建、删除可追踪”。更新和遗忘不是黑盒模型行为，而是围绕 Markdown source、session transcript、索引同步、时间衰减和预算压缩组成的生命周期。</div>
+          <div class="refs">参考：<code class="inline">extensions/memory-core/src/memory/manager-sync-ops.ts</code>、<code class="inline">extensions/memory-core/src/memory/temporal-decay.ts</code>、<code class="inline">extensions/memory-core/src/memory-budget.ts</code>、<code class="inline">extensions/memory-core/src/short-term-promotion.ts</code>、<code class="inline">src/hooks/bundled/session-memory/handler.ts</code>、<code class="inline">packages/memory-host-sdk/src/host/session-files.ts</code>、<code class="inline">extensions/memory-core/src/memory/qmd-manager.ts</code></div>
+        </section>
+
+
         <section class="section reveal" id="openclaw-gateway-overview">
           <div class="section-header"><div class="index">G1</div><h2>OpenClaw 的网关到底是干什么的</h2></div>
           <p><strong>OpenClaw Gateway</strong> 不是“模型网关”这么简单。它更像 OpenClaw 的<strong>常驻入口层 + 控制面 + 会话路由器 + 协议适配层</strong>：外部客户端、网页 Control UI、CLI、手机端、Telegram / Synology Chat 等 channel 插件，都可以通过它把一条消息变成一次 OpenClaw agent run。</p>
@@ -2050,6 +2129,64 @@ OpenClaw Agent Runtime
           <div class="callout">最容易记的说法：<strong>OpenClaw Gateway = OpenClaw 的“外部接入层 + 远程控制面”。</strong> 它不负责替模型思考；它负责让各种外部入口安全、统一、可观测地驱动同一套 agent runtime。</div>
           <div class="refs">参考：<code class="inline">src/cli/gateway-cli/run.ts</code>、<code class="inline">src/gateway/server.ts</code>、<code class="inline">src/gateway/server.impl.ts</code>、<code class="inline">src/gateway/server-http.ts</code>、<code class="inline">src/gateway/client.ts</code>、<code class="inline">src/gateway/call.ts</code>、<code class="inline">src/gateway/server-methods.ts</code>、<code class="inline">src/gateway/server-methods-list.ts</code>、<code class="inline">src/gateway/server-methods/agent.ts</code>、<code class="inline">src/commands/agent-via-gateway.ts</code>、<code class="inline">src/gateway/server-runtime-config.ts</code></div>
         </section>
+
+        <section class="section reveal" id="openclaw-gateway-communication">
+          <div class="section-header"><div class="index">G2</div><h2>OpenClaw 的通信方式</h2></div>
+          <p>OpenClaw 的通信不是一条简单 HTTP 请求。源码里可以分成四层：<strong>SDK / CLI 到 Gateway 的 RPC 通信、Gateway 事件流、Channel 插件到 agent turn 的路由、最终回复的 durable delivery</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>Gateway 是控制面和协议路由器；Channel 是外部平台适配器；EventHub 是异步事件总线；sessionKey / agentId 是把消息送回正确会话的地址。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. SDK ↔ Gateway：WebSocket RPC</h3>
+              <p><code class="inline">packages/sdk/src/transport.ts</code> 里的 <code class="inline">GatewayClientTransport</code> 会包装 <code class="inline">src/gateway/client.ts</code>。客户端调用 <code class="inline">request(method, params)</code>，底层通过 WebSocket 发请求帧。</p>
+              <p>常见 method 包括 <code class="inline">agent</code>、<code class="inline">agent.wait</code>、<code class="inline">sessions.create</code>、<code class="inline">sessions.send</code>、<code class="inline">sessions.abort</code>、<code class="inline">tasks.list/get/cancel</code>、<code class="inline">tools.catalog/effective/invoke</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Gateway → SDK：事件流</h3>
+              <p><code class="inline">packages/sdk/src/event-hub.ts</code> 提供 <code class="inline">EventHub.publish()</code> 和 <code class="inline">EventHub.stream(filter, { replay: true })</code>。Gateway 收到 agent 运行中的状态变化后，会以事件形式推给客户端。</p>
+              <p>事件类型包括 <code class="inline">agent.started</code>、<code class="inline">assistant.message</code>、<code class="inline">agent.completed</code>、<code class="inline">session.created/updated/compacted</code>、<code class="inline">task.updated</code> 等。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Channels：把外部消息变成 agent turn</h3>
+              <p>Telegram、iMessage、Slack、Discord 等入口不是直接调用模型，而是通过 channel 插件把外部平台消息标准化，然后交给 <code class="inline">src/channels/turn/kernel.ts</code> 创建一次 reply pipeline。</p>
+              <p>channel routing 会根据平台、账号、peer、thread 等信息映射到 <code class="inline">agentId</code> 和 <code class="inline">sessionKey</code>，确保同一个群、私聊或 thread 能持续进入同一条会话线。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Outbound：结果怎么发回去</h3>
+              <p><code class="inline">src/channels/message/send.ts</code>、<code class="inline">reply-pipeline.ts</code>、<code class="inline">durable-delivery.ts</code> 负责最终回复、流式 preview、工具进度 preview 和失败重试。</p>
+              <p><code class="inline">lastRoute</code> 记录“这条 session 的回复应该回到哪里”。这让 agent 运行完成后，不需要重新猜应该发到哪个 Telegram chat 或哪个 iMessage thread。</p>
+            </article>
+          </div>
+
+          <p>典型链路可以这样讲：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">用户在 Telegram / CLI / Web UI 发消息。</div>
+            <div class="flow-step" data-step="2">入口层把消息转换成 Gateway request 或 channel inbound event。</div>
+            <div class="flow-step" data-step="3">Gateway / channel routing 解析 <code class="inline">agentId</code>、<code class="inline">sessionKey</code>、附件、幂等 key、权限上下文。</div>
+            <div class="flow-step" data-step="4">OpenClaw agent runtime 执行模型推理、工具调用、memory search、artifact 生成。</div>
+            <div class="flow-step" data-step="5">运行状态通过 EventHub / Gateway stream 发给客户端；最终回复进入 reply pipeline。</div>
+            <div class="flow-step" data-step="6">durable delivery 根据 lastRoute 把消息发回原平台，失败时可以重试或记录状态。</div>
+          </div>
+
+          <pre><code>CLI / SDK
+  → GatewayClientTransport.request("agent", params)
+  → Gateway WebSocket method dispatch
+  → agent runtime
+  → EventHub: agent.started / assistant.message / agent.completed
+  → SDK stream receives events
+
+Telegram / iMessage
+  → channel plugin inbound
+  → channel turn kernel
+  → session routing: agentId + sessionKey
+  → agent runtime
+  → reply pipeline / durable delivery
+  → original chat/thread</code></pre>
+
+          <div class="callout">记忆方式：<strong>RPC 负责“发命令”，Event 负责“看过程”，Channel 负责“接外部平台”，sessionKey 负责“找到会话”，lastRoute 负责“把结果送回去”。</strong></div>
+          <div class="refs">参考：<code class="inline">packages/sdk/src/client.ts</code>、<code class="inline">packages/sdk/src/transport.ts</code>、<code class="inline">packages/sdk/src/event-hub.ts</code>、<code class="inline">packages/sdk/src/types.ts</code>、<code class="inline">src/gateway/client.ts</code>、<code class="inline">src/gateway/server*</code>、<code class="inline">src/channels/turn/kernel.ts</code>、<code class="inline">src/channels/message/send.ts</code>、<code class="inline">docs/channels/channel-routing.md</code>。</div>
+        </section>
+
 
         <section class="section reveal" id="joyagent-overview">
           <div class="section-header"><div class="index">J1</div><h2>概览介绍京东 JoyAgent-JDGenie</h2></div>
@@ -6401,6 +6538,100 @@ tool_result 返回给 Claude</code></pre>
           <div class="refs">参考文件：<code class="inline">src/utils/sandbox/sandbox-adapter.ts</code>（Claude Code 到 sandbox-runtime 的适配、配置转换、初始化、清理）、<code class="inline">src/tools/BashTool/shouldUseSandbox.ts</code>（单条命令是否进沙箱）、<code class="inline">src/utils/Shell.ts</code>（wrapWithSandbox 后 spawn）、<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">src/tools/BashTool/bashPermissions.ts</code>、<code class="inline">src/tools/BashTool/prompt.ts</code>、<code class="inline">src/tools/PowerShellTool/PowerShellTool.tsx</code>、<code class="inline">src/cli/structuredIO.ts</code>（SandboxNetworkAccess）、<code class="inline">src/commands/sandbox-toggle/index.ts</code>、<code class="inline">src/commands/sandbox-toggle/sandbox-toggle.tsx</code>。</div>
         </section>
 
+        <section class="section reveal" id="claude-workflow-24-harness">
+          <div class="section-header"><div class="index">C24</div><h2>Claude Code 的 harness 是什么</h2></div>
+          <p>这里的 <strong>harness</strong> 不应该理解成“模型思考模块”。在 Claude Code 源码语境里，它更接近<strong>外部自动化执行外壳</strong>：通过 settings、hooks、权限和运行时事件，把“当某件事发生时自动做什么”变成确定性的工程配置。</p>
+          <div class="callout"><strong>一句话：</strong>模型负责推理；harness 负责在固定事件点执行确定性动作，例如工具前检查、工具后记录、权限请求、停止前校验、压缩前处理。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 配置入口是 settings.json</h3>
+              <p><code class="inline">src/skills/bundled/updateConfig.ts</code> 里明确把“配置 Claude Code harness”指向 <code class="inline">settings.json</code>。自动行为需要写成 hooks；执行这些 hook 的是 harness，不是 Claude 模型自己。</p>
+              <p>常见配置层包括 <code class="inline">~/.claude/settings.json</code>、项目内 <code class="inline">.claude/settings.json</code> 和本地 <code class="inline">.claude/settings.local.json</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Hook event 是 harness 的插槽</h3>
+              <p><code class="inline">src/schemas/hooks.ts</code> 定义了可挂载事件：<code class="inline">PreToolUse</code>、<code class="inline">PostToolUse</code>、<code class="inline">PostToolUseFailure</code>、<code class="inline">PermissionRequest</code>、<code class="inline">Stop</code>、<code class="inline">SessionStart</code>、<code class="inline">PreCompact</code>、<code class="inline">PostCompact</code>、<code class="inline">Notification</code>、<code class="inline">UserPromptSubmit</code>。</p>
+              <p>这相当于 agent 主循环暴露出的固定生命周期点。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. matcher 用权限规则语法</h3>
+              <p>Hook matcher 可以写类似 <code class="inline">Bash(git *)</code>、<code class="inline">Read(*.ts)</code> 的规则。也就是说，它可以只对某些工具、某些命令或某些文件类型生效。</p>
+              <p>这比在 prompt 里写“每次 git 前请检查”可靠，因为 hook 是运行时强制匹配和执行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 输出可以反向影响主循环</h3>
+              <p><code class="inline">src/utils/hooks.ts</code> 会执行 command / prompt / agent / http / function hooks，并解析 JSON 输出。hook 可以增加 <code class="inline">systemMessage</code>、阻止动作、修改 <code class="inline">updatedInput</code>、给出 permission decision。</p>
+              <p>所以 harness 不是旁路日志系统，它可以真正改变工具执行和权限流。</p>
+            </article>
+          </div>
+
+          <p>典型例子：</p>
+          <pre><code>模型想调用 Bash("git push")
+  → PreToolUse hook matcher 命中 Bash(git push*)
+  → harness 执行项目配置的检查脚本
+  → hook 返回 block / ask / systemMessage
+  → Claude Code 根据 hook 输出决定拒绝、请求权限或继续
+  → 如果继续，才进入工具权限和真正 Bash 执行</code></pre>
+
+          <div class="callout">核心区别：prompt 是“建议模型这么做”；harness 是“运行时在固定事件点强制执行”。因此真正需要稳定、可审计、可复用的自动化策略，应该放在 hooks / settings / permissions 里，而不是只写进对话提示。</div>
+          <div class="refs">参考文件：<code class="inline">src/skills/bundled/updateConfig.ts</code>、<code class="inline">src/utils/hooks.ts</code>、<code class="inline">src/schemas/hooks.ts</code>、<code class="inline">src/commands/hooks/*</code>、<code class="inline">src/setup.ts</code>。</div>
+        </section>
+
+        <section class="section reveal" id="claude-workflow-25-reflection">
+          <div class="section-header"><div class="index">C25</div><h2>Claude Code 的 reflection 怎么做</h2></div>
+          <p>结论要先说清：从源码看，Claude Code 不像 Reflexion 论文那样有一个独立、统一、每轮必跑的 <strong>ReflectionTool / ReflectionEngine</strong>。它更像是把 reflection 拆散到了多个工程闭环里：工具失败回填、stop hook 反馈、plan/todo 状态、compact summary、多 agent 任务状态。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 的 reflection 不是一个单独模块，而是“把错误、反馈、计划和摘要重新放回下一轮模型上下文”，让模型在下一轮自己修正。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 工具结果自纠错</h3>
+              <p><code class="inline">query.ts</code> 收到 tool_use 后执行工具；失败时并不直接崩溃，而是把错误包装成 <code class="inline">is_error: true</code> 的 <code class="inline">tool_result</code>。下一轮模型读到错误原因后，重新选择参数、工具或方案。</p>
+              <p>这就是最常见的“反思”：模型不是事后写一篇 reflection，而是在下一轮看到失败证据后调整行为。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Stop hook 反馈循环</h3>
+              <p><code class="inline">query/stopHooks.ts</code> 和 <code class="inline">src/utils/hooks.ts</code> 支持 Stop hooks。hook 可以在模型准备停止时返回 blocking feedback，让主循环继续，而不是直接结束。</p>
+              <p>例如项目规定“停止前必须跑测试”，Stop hook 发现没测试，就把反馈塞回上下文，模型下一轮会继续补测试。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Plan / Todo / TaskList 是显式状态</h3>
+              <p>Plan mode、TodoWrite、TaskList 让模型把当前目标、子任务、完成状态外显出来。外显状态本身会进入后续上下文，模型可以对照“计划还剩什么”来修正下一步。</p>
+              <p>这属于工作流层面的 reflection：不是重新训练模型，而是让状态可见、可更新、可检查。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Compact summary 保存经验教训</h3>
+              <p><code class="inline">services/compact/*</code> 会在上下文压缩时总结用户意图、已改文件、关键错误、剩余任务。压缩后的 summary 会替代旧长上下文，继续指导后续回合。</p>
+              <p>这可以看作“长程 reflection”：把过去执行过程提炼成可继续执行的状态摘要。</p>
+            </article>
+          </div>
+
+          <p>一个失败后自修正的流程：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">模型计划编辑文件，发出 <code class="inline">Edit</code> tool_use。</div>
+            <div class="flow-step" data-step="2">运行时发现 old_string 不唯一或文件没读过，返回错误 <code class="inline">tool_result</code>。</div>
+            <div class="flow-step" data-step="3">错误结果被追加进 messages，进入下一轮模型调用。</div>
+            <div class="flow-step" data-step="4">模型阅读错误，先调用 <code class="inline">Read</code> 或扩大上下文，再重新发出更精确的 <code class="inline">Edit</code>。</div>
+            <div class="flow-step" data-step="5">如果模型想停止，Stop hook 还可以做最后检查；不满足则反馈继续。</div>
+          </div>
+
+          <pre><code>不是：
+runTask → runReflectionEngine → writeReflection → retry
+
+更接近：
+assistant tool_use
+  → tool_result(error / success)
+  → append to messages
+  → next model turn reads evidence
+  → revised tool_use or final answer
+  → stop hooks may block and feed feedback
+  → compact summary preserves useful state</code></pre>
+
+          <div class="callout">所以讲 Claude Code 的 reflection，应该说它是<strong>协议级反思</strong>：把失败、权限拒绝、hook 反馈、计划状态、压缩摘要都变成下一轮模型可读输入。不要误讲成源码里有一个统一的“反思大脑”。</div>
+          <div class="refs">参考文件：<code class="inline">src/query.ts</code>、<code class="inline">src/query/stopHooks.ts</code>、<code class="inline">src/utils/hooks.ts</code>、<code class="inline">src/services/compact/*</code>、<code class="inline">src/tasks/DreamTask/DreamTask.ts</code>。</div>
+        </section>
+
+
         <section class="section reveal" id="claude-tools-overview-scheduling-recovery">
           <div class="section-header"><div class="index">CT1</div><h2>Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</h2></div>
           <p>Claude Code 的工具调用不是“模型随便输出一个函数名然后执行”。源码里它被做成一套完整协议：<strong>工具注册表 → 模型 tool_use → schema 校验 → 权限/Hook → 并发调度 → tool.call() → tool_result 回填 → 下一轮模型纠错或继续</strong>。</p>
@@ -6710,6 +6941,79 @@ for toolUse in assistant.tool_use_blocks:
 
           <div class="callout">最短总结：<strong>Claude Code 有“工具发现排序”而没有“通用工具选择打分器”。</strong><code class="inline">ToolSearch</code> 会给 deferred tools 做关键词打分排序；但普通 Read/Grep/Bash/Agent/Edit 之间的选择，主要由模型根据工具描述和系统提示决定，Claude Code 本地只做可用性过滤、schema 校验、权限控制、执行调度和失败反馈。</div>
           <div class="refs">参考文件：<code class="inline">src/tools.ts</code>（工具池构建、过滤、按名称排序、MCP 合并）、<code class="inline">src/Tool.ts</code>（findToolByName、toolMatchesName、searchHint）、<code class="inline">src/services/api/claude.ts</code>（filteredTools、toolSchemas、defer_loading）、<code class="inline">src/utils/api.ts</code>（toolToAPISchema）、<code class="inline">src/tools/ToolSearchTool/ToolSearchTool.ts</code>（searchToolsWithKeywords、score 排序、select 直选）、<code class="inline">src/tools/ToolSearchTool/prompt.ts</code>（deferred tool 和 query forms）、<code class="inline">src/utils/toolSearch.ts</code>（ToolSearch 开关、阈值、discovered tool extraction）、<code class="inline">src/constants/prompts.ts</code>（专用工具优先规则）、<code class="inline">src/services/tools/toolOrchestration.ts</code>、<code class="inline">src/services/tools/StreamingToolExecutor.ts</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-permission-control">
+          <div class="section-header"><div class="index">CT4</div><h2>Claude Code 权限控制怎么做</h2></div>
+          <p>Claude Code 的权限控制不是单个弹窗。它是一条工具执行前的闸门链路：<strong>schema 校验 → 工具 validateInput → PreToolUse hooks → hook permission decision → 工具 checkPermissions → 通用 allow/deny/ask 规则 → 交互/SDK/远程/多 agent 权限处理器 → tool.call</strong>。</p>
+          <div class="callout"><strong>一句话：</strong>模型只能提出 tool_use；真正能不能执行，由 Claude Code 本地权限系统、hooks、sandbox、用户确认和多 agent leader 共同决定。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 入口在 runToolUse</h3>
+              <p><code class="inline">src/services/tools/toolExecution.ts</code> 先按工具名查找工具，再执行 <code class="inline">tool.inputSchema.safeParse()</code>。参数结构错了，直接返回错误 <code class="inline">tool_result</code>，不会进入权限或真实执行。</p>
+              <p>schema 过了以后，才进入 <code class="inline">checkPermissionsAndCallTool()</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Hooks 可以先拦截</h3>
+              <p><code class="inline">PreToolUse</code> hook 可以 block、修改 input，或返回 permission decision。<code class="inline">resolveHookPermissionDecision()</code> 会把 hook 决策并入权限判断。</p>
+              <p>这让团队可以配置“某些命令永远要问”“某些路径禁止写”“某些工具调用前先跑审计脚本”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 工具有自己的权限逻辑</h3>
+              <p>每个工具可以实现 <code class="inline">checkPermissions()</code>。Bash / PowerShell 权限尤其细，会分析子命令、路径、危险模式、是否适合沙箱，以及 allow/deny/ask 规则。</p>
+              <p>文件编辑工具也可以根据路径、是否已读、是否写到工作区外等条件做约束。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 通用权限规则决定 allow / deny / ask</h3>
+              <p><code class="inline">src/utils/permissions/permissions.ts</code> 处理通用 allow/deny/ask。显式 deny 通常优先于 allow；需要询问时，会交给 UI、SDK host、remote coordinator 或 swarm leader。</p>
+              <p>非交互/headless 场景通常更偏 fail-closed：不能问用户时，不会默默执行高风险动作。</p>
+            </article>
+          </div>
+
+          <p>一次 Bash 权限判断可以这样理解：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">模型发出 <code class="inline">Bash({ command: "rm -rf build" })</code>。</div>
+            <div class="flow-step" data-step="2"><code class="inline">runToolUse()</code> 校验 JSON schema 和工具输入。</div>
+            <div class="flow-step" data-step="3"><code class="inline">PreToolUse</code> hooks 根据 <code class="inline">Bash(rm *)</code> 等 matcher 先检查或阻断。</div>
+            <div class="flow-step" data-step="4"><code class="inline">BashTool.checkPermissions()</code> 分析命令、路径、是否命中 deny/ask/allow、是否可沙箱执行。</div>
+            <div class="flow-step" data-step="5">如果需要 ask，interactive / SDK / coordinator / swarm worker handler 把请求交给人或 leader。</div>
+            <div class="flow-step" data-step="6">allow 才执行 <code class="inline">tool.call()</code>；deny 则返回错误 <code class="inline">tool_result</code> 给模型修正。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Permission mode</h3>
+              <p><code class="inline">PermissionMode.ts</code> 里能看到不同模式：默认模式、accept edits / plan 相关行为、auto mode、dontAsk 转 deny、bypass permissions 等。模式会改变 ask/allow/deny 的策略。</p>
+            </article>
+            <article class="mini-card">
+              <h3>危险跳过不是无条件开放</h3>
+              <p><code class="inline">--dangerously-skip-permissions</code> 仍会被 setup 检查约束。源码里会避免在不安全环境里让用户随便绕过权限，例如非沙箱、联网、root/sudo 等组合。</p>
+            </article>
+            <article class="mini-card">
+              <h3>沙箱会改变 Bash 的风险模型</h3>
+              <p>如果命令会在 sandbox 内跑，并且没有显式 deny/ask 规则，<code class="inline">sandbox.autoAllowBashIfSandboxed</code> 可以减少弹窗。含义是允许命令执行，但把文件系统和网络边界交给 sandbox 限制。</p>
+            </article>
+            <article class="mini-card">
+              <h3>多 agent 权限会转交 leader</h3>
+              <p>Agent Team / swarm worker 自己不应该随意批准高风险动作。<code class="inline">coordinatorHandler</code>、<code class="inline">swarmWorkerHandler</code>、mailbox/poller 相关代码会把权限请求转给 leader 或用户侧处理。</p>
+            </article>
+          </div>
+
+          <pre><code>tool_use
+  → inputSchema.safeParse
+  → tool.validateInput
+  → run PreToolUse hooks
+  → resolve hook permission decision
+  → tool.checkPermissions
+  → allow/deny/ask rules
+  → interactive / SDK / coordinator / swarm handler
+  → allowed: tool.call
+  → denied: error tool_result returned to model</code></pre>
+
+          <div class="callout">关键心智模型：<strong>Claude Code 权限控制是执行前闸门，不是事后审计。</strong>它把模型意图转成可验证工具调用，再用规则、hook、人类确认、沙箱和多 agent 转交机制决定是否放行。</div>
+          <div class="refs">参考文件：<code class="inline">src/services/tools/toolExecution.ts</code>、<code class="inline">src/utils/permissions/permissions.ts</code>、<code class="inline">src/hooks/useCanUseTool.tsx</code>、<code class="inline">src/hooks/toolPermission/handlers/interactiveHandler.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/coordinatorHandler.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/swarmWorkerHandler.ts</code>、<code class="inline">src/utils/permissions/PermissionMode.ts</code>、<code class="inline">src/tools/BashTool/bashPermissions.ts</code>、<code class="inline">src/tools/PowerShellTool/powershellPermissions.ts</code>、<code class="inline">src/utils/sandbox/sandbox-adapter.ts</code>。</div>
         </section>
 
 
