@@ -907,6 +907,15 @@
             <a href="#s35">35 · OpenClaw 记忆系统的更新和遗忘</a>
           </div>
         </details>
+        <details class="toc-group" id="newQuestionsTocGroup" open>
+          <summary>
+            <span class="toc-group-title">minT训练</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
+          </div>
+        </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
           <summary>
             <span class="toc-group-title">OpenClaw Gateway</span>
@@ -1075,6 +1084,66 @@
           <span class="icon">☰</span>
           <span class="label">隐藏目录</span>
         </button>
+
+        <section class="section reveal" id="mint-simple-training-report">
+          <div class="section-header"><div class="index">01</div><h2>MinT 简单训练报告</h2></div>
+          <p>本次按照 MinT Human Quickstart 的最小 SFT 路径，在远程 MinT 服务上完成了一次 <strong>Qwen/Qwen3-0.6B LoRA 单步训练 smoke test</strong>。API key 仅通过环境变量 <code class="inline">MINT_API_KEY</code> 使用，页面与日志中不保存明文 key。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>训练配置</h3>
+              <ul>
+                <li>时间：2026-05-17 15:08 UTC</li>
+                <li>服务：<code class="inline">https://mint.macaron.xin/</code></li>
+                <li>基础模型：<code class="inline">Qwen/Qwen3-0.6B</code></li>
+                <li>算法：SFT / <code class="inline">cross_entropy</code></li>
+                <li>LoRA：rank 16，训练 MLP / Attention / Unembed</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>数据与脚本</h3>
+              <ul>
+                <li>样本数：2 条极小 prompt → response 示例</li>
+                <li>token 长度：36、12</li>
+                <li>训练脚本：<code class="inline">/root/rlhf/mint_simple_training/simple_mint_sft.py</code></li>
+                <li>报告文件：<code class="inline">/root/rlhf/mint_simple_training/training_report.json</code></li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">安装并验证 MinT SDK：Python 3.11 环境，<code class="inline">import mint</code> 正常，Tinker 兼容层版本 <code class="inline">0.15.0</code>。</div>
+            <div class="flow-step" data-step="2">创建远程 LoRA training client，并用模型 tokenizer 将两个示例转成 <code class="inline">types.Datum</code>。</div>
+            <div class="flow-step" data-step="3">执行一次 <code class="inline">forward_backward(..., loss_fn=&quot;cross_entropy&quot;)</code> 与一次 <code class="inline">optim_step</code>。</div>
+            <div class="flow-step" data-step="4">保存 LoRA 权重并发起一次采样验证，run name 为 <code class="inline">codex-simple-sft-2026-05-17-v2</code>。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>训练指标</h3>
+              <ul>
+                <li>状态：<strong>completed</strong></li>
+                <li>耗时：27.23 秒</li>
+                <li><code class="inline">loss:mean</code>：4.544022623697916</li>
+                <li><code class="inline">num_samples:sum</code>：2.0</li>
+                <li><code class="inline">num_tokens:sum</code>：30.0</li>
+                <li><code class="inline">grad_norm:last</code>：385.7864074707031</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>采样验证</h3>
+              <p>Prompt：</p>
+              <pre><code>Q: 2 + 3 = ?
+A:</code></pre>
+              <p>训练后采样输出：</p>
+              <pre><code> 5
+Okay, let's see. The question is</code></pre>
+            </article>
+          </div>
+
+          <div class="callout">结论：这不是正式效果训练，而是一次端到端连通性验证——MinT key、远程训练 client、LoRA SFT、优化步、保存权重与采样链路都已跑通。</div>
+          <div class="refs">参考：MinT Human Quickstart（安装 SDK、设置 <code class="inline">MINT_API_KEY</code>、构造 <code class="inline">types.Datum</code>、使用 <code class="inline">Qwen/Qwen3-0.6B</code> 做最小 SFT）。</div>
+        </section>
 
         <section class="section reveal" id="s1">
           <div class="section-header"><div class="index">01</div><h2>memory 的本质是什么</h2></div>
