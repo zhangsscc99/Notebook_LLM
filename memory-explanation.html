@@ -932,13 +932,13 @@
           </div>
         </details>
 
-        <details class="toc-group" id="smolagentsTocGroup" open>
+        <details class="toc-group" id="openDeepResearchTocGroup" open>
           <summary>
-            <span class="toc-group-title">Hugging Face smolagents</span>
+            <span class="toc-group-title">Open Deep Research Agent</span>
             <span class="toc-count">1 section</span>
           </summary>
           <div class="toc-group-links">
-            <a href="#smolagents-overview">01 · 概览介绍 Hugging Face smolagents</a>
+            <a href="#open-deep-research-overview">01 · 概览介绍 Open Deep Research Agent</a>
           </div>
         </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
@@ -4869,127 +4869,95 @@ Back to local
         </section>
 
 
-        <section class="section reveal" id="smolagents-overview">
-          <div class="section-header"><div class="index">SMA1</div><h2>概览介绍 Hugging Face smolagents</h2></div>
-          <p><strong>smolagents</strong> 是 Hugging Face 开源的轻量级 agent 框架。它的核心定位不是做一个很重的企业 agent 平台，而是用尽量少的抽象，把<strong>模型调用、ReAct 循环、工具、代码执行、沙箱、多模型接入、Hub 分享</strong>串起来。源码已经 clone 到服务器：<code class="inline">/root/smolagents</code>。</p>
-          <div class="callout"><strong>一句话：</strong>smolagents 的最大特点是 <strong>CodeAgent：让模型把动作写成 Python 代码，然后在受控 Python executor 里执行</strong>。工具调用不只是 JSON function call，也可以是 <code class="inline">web_search("...")</code>、<code class="inline">for ...</code>、<code class="inline">final_answer(...)</code> 这样的代码动作。</div>
+        <section class="section reveal" id="open-deep-research-overview">
+          <div class="section-header"><div class="index">ODR1</div><h2>概览介绍 Open Deep Research Agent</h2></div>
+          <p><strong>Open Deep Research Agent</strong> 不是整个 smolagents 框架本身，而是 Hugging Face 在 smolagents 仓库里的一个 Deep Research 复刻型示例项目。源码现在按实际目标 sparse clone 到服务器：<code class="inline">/root/open_deep_research/examples/open_deep_research</code>。原先误 clone 的 <code class="inline">/root/smolagents</code> 已删除。</p>
+          <div class="callout"><strong>一句话：</strong>它是一个“研究型多工具 agent team”：上层 <code class="inline">CodeAgent</code> 负责拆题、规划、调用视觉/文档工具、整合答案；下层 <code class="inline">ToolCallingAgent</code> 作为 <code class="inline">search_agent</code> 专门负责联网搜索、打开网页、翻页、页内查找、查 Wayback 归档和检查文件。</div>
 
           <div class="grid-2">
             <article class="mini-card">
-              <h3>1. 项目目标：小而直接</h3>
-              <p>README 里强调它的 agent 逻辑集中在 <code class="inline">src/smolagents/agents.py</code>，目标是让 agent 可以用几行代码跑起来。典型用法是创建 <code class="inline">CodeAgent(tools=[...], model=...)</code>，然后 <code class="inline">agent.run(task)</code>。</p>
-              <p>这和 OpenClaw / Claude Code 这种完整产品不同：smolagents 更像一个 Python agent library，适合嵌入你的应用或实验。</p>
+              <h3>1. 项目定位：开源 Deep Research 复刻</h3>
+              <p><code class="inline">README.md</code> 写得很直接：这是对 OpenAI Deep Research 的开源复刻尝试，目标是在复杂研究任务上接近类似效果。README 里还给了 GAIA validation 的成绩描述：该 agent 达到 <code class="inline">55% pass@1</code>，对比原 Deep Research 的 <code class="inline">67%</code>。</p>
+              <p>所以它不是“通用 agent 框架介绍”，而是一个面向<strong>复杂问答、网页研究、文件理解、GAIA benchmark</strong> 的具体 agent 应用。</p>
             </article>
             <article class="mini-card">
-              <h3>2. 核心 agent：CodeAgent</h3>
-              <p><code class="inline">CodeAgent</code> 在 <code class="inline">agents.py</code> 里。它每一步让模型输出 Python code block；框架解析代码，交给 <code class="inline">python_executor</code> 执行。工具会被注入成 Python 函数，所以模型可以写循环、变量、条件和多次工具调用。</p>
-              <p>这就是它说的 “Agents that think in code”：不是 agent 只会写代码，而是 agent 的 action 格式就是代码。</p>
+              <h3>2. 入口：run.py</h3>
+              <p><code class="inline">run.py</code> 是普通使用入口：命令行读入 <code class="inline">question</code> 和 <code class="inline">--model-id</code>，调用 <code class="inline">create_agent(model_id)</code> 组装 agent，然后执行 <code class="inline">agent.run(args.question)</code>。</p>
+              <p>默认模型是 <code class="inline">o1</code>。源码里通过 <code class="inline">LiteLLMModel</code> 接模型，并在 <code class="inline">model_id == "o1"</code> 时设置 <code class="inline">reasoning_effort="high"</code> 和 <code class="inline">max_completion_tokens=8192</code>。</p>
             </article>
             <article class="mini-card">
-              <h3>3. 另一条路线：ToolCallingAgent</h3>
-              <p><code class="inline">ToolCallingAgent</code> 也在 <code class="inline">agents.py</code>。它走传统 tool calling：模型输出 tool calls，框架校验参数后执行工具。多个 tool call 时会用 <code class="inline">ThreadPoolExecutor</code> 并行处理。</p>
-              <p>所以 smolagents 同时支持两种范式：代码动作式 agent 和 JSON 工具调用式 agent。</p>
+              <h3>3. 上层 manager：CodeAgent</h3>
+              <p><code class="inline">create_agent()</code> 里最终返回的是 <code class="inline">manager_agent = CodeAgent(...)</code>。它的工具是 <code class="inline">visualizer</code> 和 <code class="inline">TextInspectorTool</code>，同时挂了一个 managed agent：<code class="inline">text_webbrowser_agent</code>。</p>
+              <p>这意味着上层 agent 不是只会搜索网页。它能写 Python action，把“调用搜索子 agent、检查文件、看图片、整理证据、计算答案”组织成一个可执行过程。</p>
             </article>
             <article class="mini-card">
-              <h3>4. 统一循环：MultiStepAgent</h3>
-              <p><code class="inline">MultiStepAgent.run()</code> 是统一入口。它维护 <code class="inline">AgentMemory</code>，每轮生成 action、执行 action、记录 observation。如果工具输出 <code class="inline">final_answer</code>，就结束；否则继续下一步，直到 <code class="inline">max_steps</code>。</p>
-              <p>还支持 <code class="inline">planning_interval</code>、step callbacks、stream 输出、final answer checks、managed agents。</p>
+              <h3>4. 下层 search_agent：ToolCallingAgent</h3>
+              <p><code class="inline">text_webbrowser_agent = ToolCallingAgent(...)</code> 是专职网页研究员。它的 <code class="inline">name</code> 是 <code class="inline">search_agent</code>，描述明确要求：需要浏览网页的问题都交给它，并且调用时要给完整自然语言任务，不要只给关键词。</p>
+              <p>它设置 <code class="inline">max_steps=20</code>、<code class="inline">planning_interval=4</code>、<code class="inline">provide_run_summary=True</code>，所以它会多轮搜索并把结果摘要回传给上层 manager。</p>
             </article>
           </div>
 
-          <p>最核心的运行流程可以这样记：</p>
+          <p>核心工作流可以按线性顺序这样理解：</p>
           <div class="flow">
-            <div class="flow-step" data-step="1">用户调用 <code class="inline">agent.run(task)</code>，任务写入 <code class="inline">AgentMemory</code>。</div>
-            <div class="flow-step" data-step="2"><code class="inline">MultiStepAgent._run_stream()</code> 进入 ReAct 循环；如果配置了 planning interval，会先生成/更新计划。</div>
-            <div class="flow-step" data-step="3"><code class="inline">CodeAgent</code> 把 memory 转成 messages，调用 model 生成 Python 代码动作。</div>
-            <div class="flow-step" data-step="4">框架解析 code block，调用 <code class="inline">LocalPythonExecutor</code> 或远程 executor 执行。</div>
-            <div class="flow-step" data-step="5">执行日志和输出写回 <code class="inline">ActionStep.observations</code>，进入下一轮模型上下文。</div>
-            <div class="flow-step" data-step="6">当代码调用 <code class="inline">final_answer(...)</code> 时，executor 标记 final answer，主循环结束。</div>
+            <div class="flow-step" data-step="1">用户运行 <code class="inline">python run.py --model-id o1 "问题"</code>，<code class="inline">parse_args()</code> 取得问题和模型名。</div>
+            <div class="flow-step" data-step="2"><code class="inline">create_agent()</code> 创建 <code class="inline">LiteLLMModel</code>，配置 role conversion、token 上限；o1 额外启用 high reasoning。</div>
+            <div class="flow-step" data-step="3">创建 <code class="inline">SimpleTextBrowser</code>：设置 viewport、下载目录、User-Agent、timeout、cookies，并把网页转成适合 agent 阅读的文本视口。</div>
+            <div class="flow-step" data-step="4">组装网页工具列表：<code class="inline">GoogleSearchTool</code>、<code class="inline">VisitTool</code>、<code class="inline">PageUpTool</code>、<code class="inline">PageDownTool</code>、<code class="inline">FinderTool</code>、<code class="inline">FindNextTool</code>、<code class="inline">ArchiveSearchTool</code>、<code class="inline">TextInspectorTool</code>。</div>
+            <div class="flow-step" data-step="5">创建 <code class="inline">ToolCallingAgent</code> 作为 <code class="inline">search_agent</code>，它负责“找资料”，包括搜索、打开网页、查网页内关键词、翻页、读取 pdf/doc/xlsx 等文件文本。</div>
+            <div class="flow-step" data-step="6">创建上层 <code class="inline">CodeAgent</code> 作为 manager，挂载视觉工具、文档检查工具和 <code class="inline">search_agent</code>。</div>
+            <div class="flow-step" data-step="7">执行 <code class="inline">agent.run(question)</code>。manager 先理解问题，必要时把搜索任务委托给 <code class="inline">search_agent</code>，拿到网页证据后继续推理。</div>
+            <div class="flow-step" data-step="8">如果问题带文件，GAIA 入口 <code class="inline">run_gaia.py</code> 会先用 <code class="inline">get_single_file_description()</code> / <code class="inline">get_zip_description()</code> 生成文件说明，再把说明拼进增强问题。</div>
+            <div class="flow-step" data-step="9">最后由 manager 输出答案；GAIA 评测路径还会调用 <code class="inline">prepare_response()</code>，把完整 agent 轨迹再压成符合 benchmark 格式的 <code class="inline">FINAL ANSWER</code>。</div>
           </div>
 
-          <pre><code>from smolagents import CodeAgent, WebSearchTool, InferenceClientModel
+          <pre><code>from run import create_agent
 
-model = InferenceClientModel()
-agent = CodeAgent(tools=[WebSearchTool()], model=model, stream_outputs=True)
-agent.run("查一个问题并给出答案")
+agent = create_agent(model_id="o1")
+answer = agent.run("How many studio albums did Mercedes Sosa release before 2007?")
+print(answer)</code></pre>
 
-# 模型实际可能输出类似：
-for q in ["query A", "query B"]:
-    print(web_search(q))
-final_answer("最终结论")</code></pre>
-
+          <p>它的工具层不是简单“网页搜索 API”。源码里拆得很细：</p>
           <div class="grid-2">
             <article class="mini-card">
-              <h3>工具系统</h3>
-              <p><code class="inline">src/smolagents/tools.py</code> 定义 <code class="inline">Tool</code> 基类。工具需要有 <code class="inline">name</code>、<code class="inline">description</code>、<code class="inline">inputs</code>、<code class="inline">output_type</code> 和 <code class="inline">forward()</code>。初始化后会自动校验工具名、输入 schema、forward 签名是否一致。</p>
+              <h3>搜索和网页浏览</h3>
+              <p><code class="inline">scripts/text_web_browser.py</code> 定义 <code class="inline">SimpleTextBrowser</code>。它维护地址历史、页面标题、当前 viewport、分页边界，并把网页内容切成固定大小视口。<code class="inline">VisitTool</code> 负责打开 URL，<code class="inline">PageUpTool</code> / <code class="inline">PageDownTool</code> 负责翻页。</p>
             </article>
             <article class="mini-card">
-              <h3>默认工具</h3>
-              <p><code class="inline">src/smolagents/default_tools.py</code> 里有 <code class="inline">PythonInterpreterTool</code>、<code class="inline">FinalAnswerTool</code>、<code class="inline">DuckDuckGoSearchTool</code>、<code class="inline">VisitWebpageTool</code> 等。<code class="inline">TOOL_MAPPING</code> 负责把默认工具名映射到类。</p>
+              <h3>页内定位</h3>
+              <p><code class="inline">FinderTool</code> 和 <code class="inline">FindNextTool</code> 对应类似 Ctrl+F 的能力。它们不是把整页全部塞给模型，而是让模型在长网页中逐页定位关键词，减少上下文浪费。</p>
             </article>
             <article class="mini-card">
-              <h3>模型接入</h3>
-              <p><code class="inline">src/smolagents/models.py</code> 做模型抽象，README 里展示了 <code class="inline">InferenceClientModel</code>、<code class="inline">LiteLLMModel</code>、<code class="inline">OpenAIModel</code>、<code class="inline">TransformersModel</code>、Azure、Bedrock 等路线。</p>
+              <h3>归档网页</h3>
+              <p><code class="inline">ArchiveSearchTool</code> 调 Wayback Machine，输入 URL 和日期，找接近目标日期的历史快照。这对研究类任务很重要，因为很多答案依赖某个历史时点的页面内容。</p>
             </article>
             <article class="mini-card">
-              <h3>记忆结构</h3>
-              <p><code class="inline">src/smolagents/memory.py</code> 把运行过程拆成 <code class="inline">TaskStep</code>、<code class="inline">ActionStep</code>、<code class="inline">PlanningStep</code>、<code class="inline">FinalAnswerStep</code>。每一步都能转成 messages，下一轮模型看到的是前面动作和 observation。</p>
+              <h3>文件理解</h3>
+              <p><code class="inline">TextInspectorTool</code> 用 <code class="inline">MarkdownConverter</code> 把 html、xlsx、pptx、音频、pdf、docx 和文本类文件转成 markdown/text，再用模型根据问题生成摘要或回答。<code class="inline">visualizer</code> 则处理图片问答。</p>
             </article>
           </div>
 
-          <p>CodeAgent 的关键优势是：一个 action 可以做多个工具调用和本地计算。</p>
-          <pre><code># 传统 tool calling 常常是一轮一个/几个工具调用
-web_search({"query": "A"})
-web_search({"query": "B"})
-
-# CodeAgent 可以在一次 action 里写控制流
-queries = ["A", "B", "C"]
-results = []
-for q in queries:
-    results.append(web_search(q))
-final_answer(summarize(results))</code></pre>
-
+          <p>它的 GAIA 评测入口比普通 <code class="inline">run.py</code> 多几层工程化处理：</p>
           <div class="grid-2">
             <article class="mini-card">
-              <h3>执行安全：本地受限解释器</h3>
-              <p><code class="inline">src/smolagents/local_python_executor.py</code> 不是直接 <code class="inline">exec()</code> 任意代码。它解析 Python AST，限制危险模块和危险函数，限制 dunder 访问，限制 import 白名单，默认最大执行时间约 30 秒、最大操作数、最大 while 循环次数，并截断 print 输出。</p>
+              <h3>run_gaia.py：批量评测</h3>
+              <p><code class="inline">run_gaia.py</code> 支持 <code class="inline">--concurrency</code>、<code class="inline">--run-name</code>、<code class="inline">--set-to-run</code>。它用 <code class="inline">ThreadPoolExecutor</code> 并发跑题，把每题结果追加写入 <code class="inline">output/{set}/{run_name}.jsonl</code>。</p>
             </article>
             <article class="mini-card">
-              <h3>沙箱：远程 executor</h3>
-              <p><code class="inline">CodeAgent</code> 的 <code class="inline">executor_type</code> 支持 <code class="inline">local</code>、<code class="inline">blaxel</code>、<code class="inline">e2b</code>、<code class="inline">modal</code>、<code class="inline">docker</code>、<code class="inline">wasm</code>。远程执行器在 <code class="inline">src/smolagents/remote_executors.py</code>。</p>
+              <h3>数据集加载</h3>
+              <p><code class="inline">load_gaia_dataset()</code> 会下载 <code class="inline">gaia-benchmark/GAIA</code> 或 <code class="inline">smolagents/GAIA-annotated</code>，把列重命名成 <code class="inline">question</code>、<code class="inline">true_answer</code>、<code class="inline">task</code>。</p>
             </article>
             <article class="mini-card">
-              <h3>多 agent：managed agents</h3>
-              <p><code class="inline">MultiStepAgent</code> 可以接收 <code class="inline">managed_agents</code>。这些 agent 会被包装成可调用对象：输入是 task 和 additional_args，输出是 string。主 agent 可以像调用工具一样调用子 agent。</p>
+              <h3>附件预处理</h3>
+              <p><code class="inline">scripts/run_agents.py</code> 里 <code class="inline">get_single_file_description()</code> 会根据扩展名区分图片、pdf/xls/doc、音频和普通文件；zip 会先解压，再逐个文件生成说明。</p>
             </article>
             <article class="mini-card">
-              <h3>Hub 集成</h3>
-              <p>源码里通过 <code class="inline">huggingface_hub</code> 支持 <code class="inline">push_to_hub</code>、<code class="inline">from_hub</code>、工具/agent 序列化和 Space 形式分享。这是 Hugging Face 生态里的重要差异点。</p>
+              <h3>最终答案重写</h3>
+              <p><code class="inline">scripts/reformulator.py</code> 的 <code class="inline">prepare_response()</code> 会读取完整 agent 轨迹，要求模型输出严格的 <code class="inline">FINAL ANSWER: ...</code>。这是为了适配 GAIA 这种只看最终短答案的评测。</p>
             </article>
           </div>
 
-          <p>如果和 Claude Code / OpenClaw 对比，可以这样理解：</p>
-          <div class="grid-2">
-            <article class="mini-card">
-              <h3>smolagents 更像库</h3>
-              <p>它提供轻量 Python API，让你快速搭一个 agent。它不负责做完整桌面 CLI、长期会话系统、复杂权限 UI、项目级文件编辑状态管理。</p>
-            </article>
-            <article class="mini-card">
-              <h3>Claude Code 更像编码产品</h3>
-              <p>Claude Code 有很重的工具协议、文件状态、权限、沙箱、上下文压缩、多 agent team。它面向真实代码仓库改造。</p>
-            </article>
-            <article class="mini-card">
-              <h3>OpenClaw 更像 agent 平台</h3>
-              <p>OpenClaw 有 Gateway、channels、session routing、memory、plugins、cron、multi-agent routing，更偏长期运行的 agent 应用平台。</p>
-            </article>
-            <article class="mini-card">
-              <h3>smolagents 的独特价值</h3>
-              <p>它把 agent action 从“单个 JSON 工具调用”提升成“可执行代码片段”，适合数学、数据处理、多步工具组合、循环搜索、RAG 小实验等场景。</p>
-            </article>
-          </div>
-
-          <div class="callout">最短总结：<strong>smolagents = Hugging Face 的轻量 agent 库，核心卖点是 CodeAgent。</strong>它用 Python 代码作为 action 表达，配合受限/沙箱 executor 执行；同时保留 ToolCallingAgent、工具系统、模型适配、managed agents、Hub 分享能力。</div>
-          <div class="refs">本地源码：<code class="inline">/root/smolagents</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">src/smolagents/agents.py</code>、<code class="inline">src/smolagents/tools.py</code>、<code class="inline">src/smolagents/local_python_executor.py</code>、<code class="inline">src/smolagents/remote_executors.py</code>、<code class="inline">src/smolagents/memory.py</code>、<code class="inline">src/smolagents/models.py</code>、<code class="inline">src/smolagents/default_tools.py</code>。</div>
+          <div class="callout">最短总结：<strong>Open Deep Research Agent = smolagents 上构建的研究型双层 agent。</strong>上层 <code class="inline">CodeAgent</code> 管全局推理和答案整合；下层 <code class="inline">ToolCallingAgent</code> 管网页研究；浏览器、文件转换、视觉问答、归档网页和 GAIA 评测脚本共同组成一个面向复杂研究任务的可复现实验系统。</div>
+          <div class="refs">本地源码：<code class="inline">/root/open_deep_research/examples/open_deep_research</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">run.py</code>、<code class="inline">run_gaia.py</code>、<code class="inline">app.py</code>、<code class="inline">scripts/text_web_browser.py</code>、<code class="inline">scripts/text_inspector_tool.py</code>、<code class="inline">scripts/run_agents.py</code>、<code class="inline">scripts/reformulator.py</code>、<code class="inline">scripts/visual_qa.py</code>。</div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
