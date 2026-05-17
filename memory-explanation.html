@@ -967,7 +967,7 @@
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">6 sections</span>
+            <span class="toc-count">7 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
@@ -976,6 +976,7 @@
             <a href="#claude-tools-permission-control">04 · Claude Code 权限控制怎么做</a>
             <a href="#claude-tools-deep-dive-source-patterns">05 · Claude Code 十几个工具源码详解：怎么写、怎么优化</a>
             <a href="#claude-tools-grep-glob-read-layered-limits">06 · Claude Code 的 Grep / Glob / Read 等工具具体有哪些，读取限制和分层读取怎么做</a>
+            <a href="#claude-tools-readfilestate-staleness-batched-read">07 · FileReadState 怎么管理文件是否改过，以及全量读取是否分批</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -7393,6 +7394,121 @@ Glob:
 
           <div class="callout">回答你的问题：<strong>是的，读取有限制；也有分层读取。</strong>限制包括 Read 默认 2000 行、约 256KB 文件大小门槛、25000 token 输出门槛、PDF 20 页、Glob 100 结果、Grep 默认 250 结果。分层读取不是一个叫“LayeredReader”的单独模块，而是 <code class="inline">Glob/Grep 先缩小范围 + Read offset/limit 分段 + readFileInRange fast/stream 双路径 + dedup/file_unchanged</code> 共同组成的工程策略。</div>
           <div class="refs">参考文件：<code class="inline">src/tools/GlobTool/GlobTool.ts</code>、<code class="inline">src/tools/GrepTool/GrepTool.ts</code>、<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/tools/FileReadTool/limits.ts</code>、<code class="inline">src/tools/FileReadTool/prompt.ts</code>、<code class="inline">src/utils/readFileInRange.ts</code>、<code class="inline">src/tools/LSPTool/LSPTool.ts</code>、<code class="inline">src/tools/BashTool/BashTool.tsx</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-readfilestate-staleness-batched-read">
+          <div class="section-header"><div class="index">CT7</div><h2>FileReadState 怎么管理文件是否改过，以及全量读取是否分批</h2></div>
+          <p><code class="inline">readFileState</code> 是 Claude Code 用来记“模型已经看过哪些文件内容”的本地缓存。它不是模型记忆，而是运行时状态：路径 → 文件内容快照 → 文件修改时间 → 读取范围。Edit / Write 依赖它判断“模型是不是先读过文件、读过之后文件有没有被外部改过”。</p>
+          <div class="callout"><strong>一句话：</strong><code class="inline">readFileState</code> 管的是“已读文件快照 + mtime”。如果磁盘 mtime 比缓存 timestamp 新，Claude Code 会认为文件可能变了；Edit/Write 会拒绝或做内容比对兜底，要求模型重新 Read，避免基于旧内容写文件。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 数据结构是什么</h3>
+              <p>源码在 <code class="inline">src/utils/fileStateCache.ts</code>。每个 entry 是 <code class="inline">{ content, timestamp, offset, limit, isPartialView? }</code>。key 会用 <code class="inline">path.normalize()</code> 规范化，避免同一路径因为 <code class="inline">/foo/../bar</code> 或 Windows 分隔符不同而 miss。</p>
+              <p>缓存是 LRU：默认 <code class="inline">100</code> 个 entry，默认最大内容体积约 <code class="inline">25MB</code>，防止长会话里无限保存大文件内容。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Read 怎么写入 readFileState</h3>
+              <p><code class="inline">FileReadTool.call()</code> 成功读取 text / notebook 后，会把内容、磁盘 <code class="inline">mtimeMs</code>、<code class="inline">offset</code>、<code class="inline">limit</code> 写进 <code class="inline">readFileState</code>。</p>
+              <p>图片和 PDF 不走同样的文本缓存逻辑；Read 的重复读取 dedup 也主要针对 text / notebook。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. Edit / Write 怎么判断文件改过</h3>
+              <p>Edit / Write 调用前先查 <code class="inline">readFileState.get(path)</code>。如果没有 entry，就返回“File has not been read yet”；如果文件当前 <code class="inline">mtime</code> 大于缓存 timestamp，就认为文件读后被改过。</p>
+              <p>Windows / 云同步 / 杀毒软件可能只改 mtime 不改内容，所以源码对 full-read entry 做了内容比对兜底：如果磁盘内容和缓存 content 一样，可以继续；否则抛 <code class="inline">FILE_UNEXPECTEDLY_MODIFIED_ERROR</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Edit / Write 成功后会更新缓存</h3>
+              <p>文件写入成功后，FileEditTool / FileWriteTool 会把新内容和新的 mtime 写回 <code class="inline">readFileState</code>，并把 <code class="inline">offset</code>、<code class="inline">limit</code> 设为 <code class="inline">undefined</code>。这表示运行时现在知道完整 post-write 内容。</p>
+              <p>Bash 里模拟 sed edit 成功后也会更新这个缓存，避免下一次 Edit 误判为旧状态。</p>
+            </article>
+          </div>
+
+          <pre><code>// src/utils/fileStateCache.ts，简化
+export type FileState = {
+  content: string
+  timestamp: number        // 读到/写完时的 mtime
+  offset: number | undefined
+  limit: number | undefined
+  isPartialView?: boolean  // 自动注入的部分视图，不能直接作为编辑依据
+}
+
+// Edit / Write 的核心判断，简化
+const lastRead = readFileState.get(filePath)
+const lastWriteTime = getFileModificationTime(filePath)
+if (!lastRead) fail('File has not been read yet')
+if (lastWriteTime > lastRead.timestamp) {
+  if (lastRead.offset === undefined && diskContent === lastRead.content) {
+    // mtime 变了但内容没变，允许继续
+  } else {
+    throw FILE_UNEXPECTEDLY_MODIFIED_ERROR
+  }
+}</code></pre>
+
+          <p>它怎么知道“需不需要再读”？可以按三种场景记：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>没缓存：</strong>模型没通过 Read 看过这个文件，Edit/Write 拒绝，要求先 Read。</div>
+            <div class="flow-step" data-step="2"><strong>mtime 没变：</strong>说明磁盘文件和上次 Read/Write 时一致，可以继续。</div>
+            <div class="flow-step" data-step="3"><strong>mtime 变了：</strong>说明用户、formatter、linter、git checkout 或别的工具可能改了文件；如果内容也不同，就必须重新 Read。</div>
+            <div class="flow-step" data-step="4"><strong>自动注入的 partial view：</strong><code class="inline">isPartialView=true</code> 的 entry 不能支撑 Edit/Write，必须显式 Read。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>恢复会话时怎么重建缓存</h3>
+              <p><code class="inline">extractReadFilesFromMessages()</code> 会从历史 transcript 里提取 Read / Write / Edit 结果，重建 <code class="inline">readFileState</code>。Read 结果会去掉行号和 system-reminder；Write 用工具输入里的完整 content；Edit 则从当前磁盘读 post-edit 内容。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么有 seed_read_state</h3>
+              <p>SDK / CLI 可能把旧 Read 从上下文里 snip 掉，但客户端仍知道用户看过这个文件。<code class="inline">seed_read_state</code> 可以用 path + mtime 补种缓存；如果磁盘 mtime 已经晚于客户端观察时间，就不种，强制重新 Read。</p>
+            </article>
+            <article class="mini-card">
+              <h3>changed files 注入</h3>
+              <p><code class="inline">getChangedFiles()</code> 会遍历 readFileState，检查磁盘 mtime 是否更新。如果变了，会调用 Read 读当前内容，再和缓存 content 做 diff，把变化片段作为 attachment 注入给模型。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么 ranged read 特殊</h3>
+              <p>源码里 <code class="inline">getChangedFiles()</code> 对带 <code class="inline">offset/limit</code> 的 entry 直接跳过，注释写着 TODO。原因是只读过局部片段时，无法可靠代表全文件差异。</p>
+            </article>
+          </div>
+
+          <p>再回答“行数限制后，如果需要全量读，是不是分批读？”</p>
+          <div class="callout"><strong>准确说：</strong>Read 的 prompt 写着默认最多 2000 行，并引导模型用 <code class="inline">offset/limit</code>；真正硬限制主要是 <code class="inline">maxSizeBytes</code> 和 <code class="inline">maxTokens</code>。如果文件小，模型可以一次不传 offset/limit 读完整文件；如果文件大，正确做法是先 Grep/Glob 定位，再用 offset/limit 分批读必要片段。需要全量理解时，才分批顺序读。</div>
+
+          <pre><code>// 小文件：一次读完整文件
+Read({ file_path: "/repo/src/a.ts" })
+
+// 大文件：分批读，或者按 Grep 命中读局部
+Read({ file_path: "/repo/src/big.ts", offset: 1, limit: 400 })
+Read({ file_path: "/repo/src/big.ts", offset: 401, limit: 400 })
+Read({ file_path: "/repo/src/big.ts", offset: 801, limit: 400 })
+
+// 更推荐：先搜再读命中附近
+Grep({ pattern: "function runToolUse", path: "src", output_mode: "content", "-n": true, head_limit: 20 })
+Read({ file_path: "/repo/src/services/tools/toolExecution.ts", offset: 120, limit: 180 })</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>readFileInRange 的两条读取路径</h3>
+              <p><code class="inline">src/utils/readFileInRange.ts</code> 小于 <code class="inline">10MB</code> 的普通文件走 fast path：一次 <code class="inline">readFile()</code>，内存里切行。大文件、pipe、device 走 streaming path：逐 chunk 扫 <code class="inline">\n</code>，只累积 offset/limit 目标范围内的行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>分批读不是自动循环</h3>
+              <p>Claude Code 不会后端自动把一个大文件全量拆成 10 次 Read。它给模型 offset/limit 和错误提示，模型根据任务决定是否继续读下一段。这样避免无意义地把整仓库大文件塞满上下文。</p>
+            </article>
+            <article class="mini-card">
+              <h3>分批读后的编辑风险</h3>
+              <p>局部 Read 可以让模型理解某个片段，但源码对 changed-files diff 还不支持 offset/limit entry。做高风险大范围编辑时，更稳的是针对要改的位置读足够上下文，或者用 Grep 定位每个改点，而不是假装已经全量理解文件。</p>
+            </article>
+            <article class="mini-card">
+              <h3>重复读怎么省上下文</h3>
+              <p>同一文件同一范围如果 mtime 没变，Read 会返回 <code class="inline">FILE_UNCHANGED_STUB</code>，告诉模型之前的 Read 结果仍然有效。这是为了减少同一内容反复进入上下文。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>readFileState = LRU 的文件快照账本。</strong>Read/Write/Edit 更新账本；Edit/Write 用账本的 mtime 和 content 防止 stale write；大文件不是自动全量读，而是通过 Grep/Glob 定位后用 offset/limit 分批读必要范围。</div>
+          <div class="refs">参考文件：<code class="inline">src/utils/fileStateCache.ts</code>、<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/tools/FileEditTool/FileEditTool.ts</code>、<code class="inline">src/tools/FileWriteTool/FileWriteTool.ts</code>、<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">src/utils/queryHelpers.ts</code>、<code class="inline">src/utils/attachments.ts</code>、<code class="inline">src/utils/readFileInRange.ts</code>、<code class="inline">src/cli/print.ts</code>。</div>
         </section>
 
 
