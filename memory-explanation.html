@@ -942,6 +942,15 @@
             <a href="#open-deep-research-vs-hermes-gaia">02 · 为什么 Deep Research Agent 在 GAIA 上更容易打过 Hermes 这类通用 Agent</a>
           </div>
         </details>
+        <details class="toc-group" id="algorithmBasicsTocGroup" open>
+          <summary>
+            <span class="toc-group-title">算法查漏补缺</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#algorithm-embedding-reranker">01 · embedding 模型和 reranker 模型原理是什么</a>
+          </div>
+        </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
@@ -5020,6 +5029,79 @@ print(answer)</code></pre>
 
           <div class="callout"><strong>最终判断：</strong>ODR 在 GAIA 上更容易好，是<strong>任务适配胜利</strong>：专门数据集入口、附件预处理、多模态工具、文本浏览器、Wayback、搜索子 agent、答案 reformulator。Hermes 的优势是<strong>平台和训练基建</strong>：如果要让 Hermes 打 GAIA，应把 ODR 这套 GAIA harness 移植进去，再用 Hermes 的 RL 环境对 GAIA/GAIA-like 任务做 reward training，而不是直接拿通用 web research prompt 去比。</div>
           <div class="refs">Open Deep Research 参考：<code class="inline">/root/open_deep_research/examples/open_deep_research/README.md</code>、<code class="inline">run.py</code>、<code class="inline">run_gaia.py</code>、<code class="inline">scripts/run_agents.py</code>、<code class="inline">scripts/text_web_browser.py</code>、<code class="inline">scripts/text_inspector_tool.py</code>、<code class="inline">scripts/reformulator.py</code>、<code class="inline">scripts/visual_qa.py</code>。Hermes 参考：<code class="inline">/root/hermes/README.md</code>、<code class="inline">environments/web_research_env.py</code>、<code class="inline">environments/agent_loop.py</code>、<code class="inline">environments/hermes_base_env.py</code>、<code class="inline">environments/tool_context.py</code>、<code class="inline">tools/web_tools.py</code>、<code class="inline">tools/tool_result_storage.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="algorithm-embedding-reranker">
+          <div class="section-header"><div class="index">ALG1</div><h2>embedding 模型和 reranker 模型原理是什么</h2></div>
+          <p><strong>embedding 模型</strong>和<strong>reranker 模型</strong>都是检索/RAG 系统里的核心组件，但它们解决的问题不一样：embedding 负责“快速从海量文本里召回一批可能相关的候选”；reranker 负责“在候选里更精细地重新排序，把真正最相关的放前面”。</p>
+          <div class="callout"><strong>一句话：</strong>embedding 是<strong>粗筛</strong>，把文本压成向量后做相似度搜索；reranker 是<strong>精排</strong>，直接看“query + 文档”的完整交互关系，判断这篇文档到底有多相关。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. embedding 模型在做什么</h3>
+              <p>embedding 模型会把一句话、一段文本、一个代码块变成一个固定长度的向量，比如 768 维、1024 维、1536 维。这个向量不是给人看的，而是给机器算距离用的。</p>
+              <p>理想效果是：语义相近的文本，向量距离近；语义不相关的文本，向量距离远。例如“怎么重置密码”和“忘记密码怎么办”会靠得近，即使字面不完全一样。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. embedding 怎么训练出来</h3>
+              <p>常见训练目标是对比学习：给模型一个 query、一个正样本文档、若干负样本文档。模型要学会让 query 向量更靠近正样本，更远离负样本。</p>
+              <p>训练后，模型不是直接输出答案，而是输出“语义坐标”。这些坐标可以提前算好，放进向量数据库或本地 ANN 索引里。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. reranker 模型在做什么</h3>
+              <p>reranker 不负责从几百万文档里直接搜索。它通常接收 query 和已经召回的候选文档，比如 top 50 或 top 100，然后逐个判断相关性，输出分数。</p>
+              <p>它的输入通常是成对的：<code class="inline">[query, document]</code>。模型能同时看到问题和文档内容，所以可以判断更细的匹配关系：是否真正回答问题、是否只是关键词重合、是否缺少关键条件。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. reranker 为什么更准但更慢</h3>
+              <p>embedding 可以提前把文档向量全部算好，查询时只需要算 query 向量，再做近邻搜索，所以很快。</p>
+              <p>reranker 必须在查询发生后，把 query 和每个候选文档一起送进模型。每个候选都要跑一次或一批推理，所以算力成本更高，但排序质量通常更好。</p>
+            </article>
+          </div>
+
+          <p>一个标准 RAG 检索链路通常是这样：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>离线建库。</strong>把文档切 chunk，然后用 embedding 模型把每个 chunk 编码成向量，写入向量库。</div>
+            <div class="flow-step" data-step="2"><strong>线上查询。</strong>用户问题进来后，也用同一个 embedding 模型编码成 query 向量。</div>
+            <div class="flow-step" data-step="3"><strong>粗召回。</strong>向量库用余弦相似度、点积或 L2 距离找 topK chunk，比如先取 50 条。</div>
+            <div class="flow-step" data-step="4"><strong>精排序。</strong>reranker 对这 50 条逐条打分，选出最相关的 top 5。</div>
+            <div class="flow-step" data-step="5"><strong>生成答案。</strong>把 top 5 放进 LLM 上下文，让 LLM 基于这些证据回答。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>embedding 的优势</h3>
+              <p>快、便宜、可扩展。适合百万级、千万级文档召回。它解决的是“从大海里先捞一网鱼”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>embedding 的瓶颈</h3>
+              <p>它把整段文本压成一个向量，细节会丢。遇到否定、数字条件、时间条件、多跳关系、关键词相同但语义不同的情况，可能召回或排序不准。</p>
+            </article>
+            <article class="mini-card">
+              <h3>reranker 的优势</h3>
+              <p>它能看 query 和 document 的细粒度交互，所以更擅长判断“这段是否真的回答了这个问题”。适合提升 topK 质量。</p>
+            </article>
+            <article class="mini-card">
+              <h3>reranker 的瓶颈</h3>
+              <p>慢、贵、不能直接扫全库。它必须依赖前面的召回阶段。如果 embedding 没把正确文档召回来，reranker 后面也救不了。</p>
+            </article>
+          </div>
+
+          <p>两者的本质区别可以这样记：</p>
+          <pre><code>embedding 模型：
+query -> 向量
+文档 -> 向量
+相似度(query_vector, doc_vector) -> 粗略相关性
+
+reranker 模型：
+(query, 文档) -> 模型一起阅读 -> 相关性分数
+
+所以：
+embedding = 双塔 / bi-encoder / 适合召回
+reranker = 交叉编码 / cross-encoder / 适合精排</code></pre>
+
+          <div class="callout">最短总结：<strong>embedding 模型决定“能不能把可能相关的资料捞出来”，reranker 模型决定“捞出来后谁最应该排前面”。</strong>实际系统里通常不是二选一，而是 embedding 先召回，再用 reranker 精排。</div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
