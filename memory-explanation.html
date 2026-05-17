@@ -931,7 +931,7 @@
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
           <summary>
             <span class="toc-group-title">claude code工作流编排</span>
-            <span class="toc-count">22 sections</span>
+            <span class="toc-count">23 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-workflow-1">01 · 总体入口</a>
@@ -956,6 +956,7 @@
             <a href="#claude-workflow-20-langgraph-single-agent-two-tool-calls">20 · 用 LangGraph 讲 Claude Code 单 agent 两轮工具调用的 GraphState 和节点流转</a>
             <a href="#claude-workflow-21-agentteam-tasklist-shared-sync-loop">21 · Agent Team 的 TaskList 是否共享同步、每轮是否先读 mailbox 和 TaskList</a>
             <a href="#claude-workflow-22-context-compression">22 · Claude Code 怎么做上下文压缩</a>
+            <a href="#claude-workflow-23-sandbox">23 · Claude Code 的沙箱怎么做的</a>
           </div>
         </details>
         <details class="toc-group" id="claudeToolsTocGroup" open>
@@ -6292,6 +6293,110 @@ callModel(messagesForQuery)</code></pre>
 
           <div class="callout">最短总结：<strong>Claude Code 的上下文压缩是“摘要 + 保留最近窗口 + 恢复运行时附件 + 保护工具协议”的组合。</strong> 它不是粗暴截断；真正复杂的地方在于压缩后还要让 agent 能安全继续工作。</div>
           <div class="refs">参考文件：<code class="inline">src/query.ts</code>（压缩链路、auto compact、prompt-too-long/reactive recovery）、<code class="inline">src/commands/compact/index.ts</code>、<code class="inline">src/commands/compact/compact.ts</code>（/compact 命令）、<code class="inline">src/services/compact/autoCompact.ts</code>（阈值、自动触发、失败熔断）、<code class="inline">src/services/compact/compact.ts</code>（compactConversation、partialCompactConversation、post compact messages）、<code class="inline">src/services/compact/prompt.ts</code>（摘要 prompt）、<code class="inline">src/services/compact/microCompact.ts</code>（工具结果微压缩）、<code class="inline">src/services/compact/sessionMemoryCompact.ts</code>（session memory compact）、<code class="inline">src/services/compact/postCompactCleanup.ts</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-workflow-23-sandbox">
+          <div class="section-header"><div class="index">C23</div><h2>Claude Code 的沙箱怎么做的</h2></div>
+          <p>Claude Code 的沙箱不是“把整个项目复制进一个 Docker 容器再改完拷回来”。从源码看，它主要是给 <strong>Bash / PowerShell 这类命令执行工具</strong> 加一层 OS 级运行时隔离：命令还是在当前工作目录语义下执行，但真正 spawn 前会被 <code class="inline">@anthropic-ai/sandbox-runtime</code> 包一层，限制它能读写哪些路径、能连哪些网络主机。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 沙箱 = 应用层权限判断 + 命令级 OS sandbox wrapper。模型仍然发起 <code class="inline">Bash</code> / <code class="inline">PowerShell</code> 工具调用；真正危险的 shell 进程被放进受限环境里跑。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 沙箱管的是谁</h3>
+              <p>核心覆盖对象是 shell 命令：<code class="inline">BashTool.tsx</code> 和 <code class="inline">PowerShellTool.tsx</code> 都会把 <code class="inline">shouldUseSandbox</code> 传给 <code class="inline">src/utils/Shell.ts</code>。</p>
+              <p>文件读写工具不是靠这个 shell wrapper 执行，而是走 Claude Code 自己的工具权限、路径权限、schema 校验。也就是说：沙箱不是替代所有权限系统，而是专门给“命令进程”兜底。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 两层安全模型</h3>
+              <p><strong>应用层：</strong><code class="inline">checkPermissions()</code>、Bash 规则、allow/deny/ask、用户确认、企业策略，决定这个工具调用能不能发起。</p>
+              <p><strong>运行时层：</strong><code class="inline">SandboxManager.wrapWithSandbox()</code> 把命令变成受限命令，由外部 <code class="inline">sandbox-runtime</code> 在 macOS / Linux / WSL2 上做文件系统和网络隔离。</p>
+            </article>
+          </div>
+
+          <p>主链路可以按这个顺序记：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">启动时读取 settings / permissions，<code class="inline">SandboxManager.initialize()</code> 初始化沙箱运行时。</div>
+            <div class="flow-step" data-step="2"><code class="inline">convertToSandboxRuntimeConfig()</code> 把 Claude Code 配置转换成 runtime 能理解的 <code class="inline">filesystem</code> / <code class="inline">network</code> 限制。</div>
+            <div class="flow-step" data-step="3">模型发起 <code class="inline">Bash</code> 或 <code class="inline">PowerShell</code> 工具调用。</div>
+            <div class="flow-step" data-step="4"><code class="inline">shouldUseSandbox(input)</code> 判断这一条命令是否需要进沙箱。</div>
+            <div class="flow-step" data-step="5"><code class="inline">Shell.exec()</code> 调用 <code class="inline">SandboxManager.wrapWithSandbox(command)</code>，拿到被包装后的命令字符串。</div>
+            <div class="flow-step" data-step="6">Node <code class="inline">spawn()</code> 启动包装后的命令；OS 沙箱实际拦截越权读写和网络连接。</div>
+            <div class="flow-step" data-step="7">命令结束后 <code class="inline">cleanupAfterCommand()</code> 清理沙箱副作用，并把 sandbox violation 信息回传到工具结果。</div>
+          </div>
+
+          <pre><code>用户/模型: Bash({ command: "npm test &amp;&amp; curl example.com" })
+   ↓
+BashTool.call()
+   ↓
+shouldUseSandbox(input)
+   ↓ true
+Shell.exec(command, { shouldUseSandbox: true })
+   ↓
+SandboxManager.wrapWithSandbox(command, binShell)
+   ↓
+@anthropic-ai/sandbox-runtime 生成平台相关 wrapper
+   ↓
+spawn(wrapperCommand)
+   ↓
+文件系统 / 网络访问被 runtime 限制
+   ↓
+stdout / stderr / &lt;sandbox_violations&gt;...&lt;/sandbox_violations&gt;
+   ↓
+tool_result 返回给 Claude</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>3. 配置怎么变成沙箱规则</h3>
+              <p><code class="inline">sandbox-adapter.ts</code> 里的 <code class="inline">convertToSandboxRuntimeConfig()</code> 会收集两类信息：一类来自 <code class="inline">settings.sandbox</code>，一类来自普通权限规则，比如 <code class="inline">Edit(path)</code>、<code class="inline">Read(path)</code>、<code class="inline">WebFetch(domain:...)</code>。</p>
+              <p>它默认允许写当前目录 <code class="inline">.</code> 和 Claude 临时目录；额外目录来自 <code class="inline">permissions.additionalDirectories</code> 和 Claude.md 相关附加目录。</p>
+              <p>网络规则会合并 <code class="inline">sandbox.network.allowedDomains</code> / <code class="inline">deniedDomains</code>，以及 <code class="inline">WebFetch(domain:...)</code> 规则，还支持 Unix socket、本地 binding、HTTP/SOCKS proxy 等配置。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 哪些东西默认不让写</h3>
+              <p>源码里有几个明显的防逃逸点：禁止写 settings 文件，防止命令偷偷改权限；禁止写 <code class="inline">.claude/skills</code>，防止命令植入自动加载的高权限 skill；对裸 git repo 相关的 <code class="inline">HEAD</code>、<code class="inline">objects</code>、<code class="inline">refs</code>、<code class="inline">hooks</code>、<code class="inline">config</code> 做 deny/scrub，防止利用 git 机制绕过沙箱。</p>
+              <p>所以它防的不是“模型想不想作恶”，而是“shell 进程即使执行了危险命令，也尽量不能改到权限配置、skills、git 逃逸点、未授权目录”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. 一条命令什么时候进沙箱</h3>
+              <p><code class="inline">shouldUseSandbox()</code> 的判断很直接：沙箱必须启用、平台和依赖可用、命令存在、没有被配置为 excluded command。</p>
+              <p>模型可以传 <code class="inline">dangerouslyDisableSandbox: true</code>，但只有 <code class="inline">allowUnsandboxedCommands</code> 允许时才会生效。否则企业策略要求沙箱时，不能靠这个字段绕过。</p>
+              <p><code class="inline">excludedCommands</code> 是用户便利功能，不是安全边界；源码还会拆 compound command，避免 <code class="inline">docker ps &amp;&amp; curl evil.com</code> 因为前半段命中 excluded 就整体逃出沙箱。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. 平台和底层实现</h3>
+              <p>这个仓库没有直接把 bubblewrap / sandbox-exec 的完整实现写在源码里，而是通过 <code class="inline">@anthropic-ai/sandbox-runtime</code> 委托出去。Claude Code 适配层负责配置转换、初始化、权限提示、清理和 UI 展示。</p>
+              <p>源码注释能看到支持平台是 macOS、Linux、WSL2；Linux 依赖提示里提到 <code class="inline">bubblewrap</code>、<code class="inline">socat</code>；PowerShell 在 Linux/macOS/WSL2 可走同一套 wrapper，原生 Windows 不支持该沙箱。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>7. 网络权限怎么问用户</h3>
+              <p>如果命令访问未明确允许的网络主机，sandbox runtime 可以触发 ask callback。<code class="inline">structuredIO.createSandboxAskCallback()</code> 会把它包装成一个合成工具权限请求：<code class="inline">SandboxNetworkAccess</code>。</p>
+              <p>这样 VS Code、CCR、SDK host 看到的仍然是熟悉的 <code class="inline">can_use_tool</code> 权限协议，而不是单独发明一套网络弹窗协议。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. 为什么沙箱会减少弹窗</h3>
+              <p><code class="inline">bashPermissions.ts</code> 支持 <code class="inline">sandbox.autoAllowBashIfSandboxed</code>。含义是：如果命令会在沙箱里跑，并且没有显式 deny/ask 规则拦住，就可以自动允许 Bash。</p>
+              <p>这不是“完全信任命令”，而是把信任转移成“我允许你跑，但你只能在沙箱授予的目录和网络范围里跑”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>9. 失败后怎么反馈给模型</h3>
+              <p><code class="inline">BashTool.tsx</code> 会用 <code class="inline">SandboxManager.annotateStderrWithSandboxFailures()</code> 标注 stderr；结果展示组件会识别 <code class="inline">&lt;sandbox_violations&gt;</code> 标签。</p>
+              <p>Bash prompt 里也专门告诉模型：默认用沙箱；只有用户明确要求，或者命令失败且有证据表明是 sandbox restriction，才考虑 <code class="inline">dangerouslyDisableSandbox</code>，并且还要看策略是否允许。</p>
+            </article>
+            <article class="mini-card">
+              <h3>10. 启动和不可用处理</h3>
+              <p><code class="inline">print.ts</code> 启动时会检查 <code class="inline">getSandboxUnavailableReason()</code>。如果用户启用了沙箱但平台/依赖不满足，会给出警告；如果设置了 <code class="inline">sandbox.failIfUnavailable</code>，则不能静默降级成无沙箱执行。</p>
+              <p><code class="inline">/sandbox</code> 命令用于查看和配置状态，也能添加 excluded command；企业高优先级配置可以锁定本地设置。</p>
+            </article>
+          </div>
+
+          <p>一个具体例子：模型想执行 <code class="inline">npm test</code>，测试脚本里某个恶意 postinstall 或测试用例试图写 <code class="inline">~/.ssh/config</code>、改 <code class="inline">.claude/settings.local.json</code>、偷偷往 <code class="inline">.claude/skills</code> 塞文件、再 <code class="inline">curl</code> 到未知域名。没有沙箱时，这些风险主要靠权限弹窗和用户判断；有沙箱时，命令进程本身会被限制在允许写路径和允许网络范围内，越界访问会失败并形成 sandbox violation。Claude Code 再把失败原因回到工具结果里，让模型换方案，比如只改项目内文件、请求用户授权某个域名，或者在策略允许时解释为什么需要非沙箱执行。</p>
+
+          <div class="callout">最短总结：<strong>Claude Code 的沙箱是“命令执行沙箱”，不是“模型沙箱”也不是“整仓库复制容器”。它把 shell 进程包进受限运行时，用 settings / permissions 生成文件系统和网络边界，再把 violation、网络授权、清理、UI 提示接回 Claude Code 的 agent 循环。</strong></div>
+          <div class="refs">参考文件：<code class="inline">src/utils/sandbox/sandbox-adapter.ts</code>（Claude Code 到 sandbox-runtime 的适配、配置转换、初始化、清理）、<code class="inline">src/tools/BashTool/shouldUseSandbox.ts</code>（单条命令是否进沙箱）、<code class="inline">src/utils/Shell.ts</code>（wrapWithSandbox 后 spawn）、<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">src/tools/BashTool/bashPermissions.ts</code>、<code class="inline">src/tools/BashTool/prompt.ts</code>、<code class="inline">src/tools/PowerShellTool/PowerShellTool.tsx</code>、<code class="inline">src/cli/structuredIO.ts</code>（SandboxNetworkAccess）、<code class="inline">src/commands/sandbox-toggle/index.ts</code>、<code class="inline">src/commands/sandbox-toggle/sandbox-toggle.tsx</code>。</div>
         </section>
 
         <section class="section reveal" id="claude-tools-overview-scheduling-recovery">
