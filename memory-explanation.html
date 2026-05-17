@@ -962,11 +962,12 @@
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
             <a href="#claude-tools-argument-format-validation">02 · Claude Code 怎么避免工具调用参数格式错误</a>
+            <a href="#claude-tools-selection-scoring-ranking">03 · Claude Code 里多工具都能完成同一子任务时怎么选择，是否有打分或排序模块</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -6612,6 +6613,103 @@ Read({ "file_path": "src/index.ts" })
 
           <div class="callout">最短总结：<strong>Claude Code 防参数格式错误靠四件事：工具 schema 前置给模型、本地 Zod 二次校验、错误 tool_result 反馈可修正原因、下一轮模型按错误重试。</strong> 它不假设模型永远会写对参数，而是把“写错了也能安全纠正”做进工具协议。</div>
           <div class="refs">参考文件：<code class="inline">src/Tool.ts</code>（Tool 接口、inputSchema、strict、validateInput）、<code class="inline">src/utils/api.ts</code>（toolToAPISchema、normalizeToolInput、normalizeToolInputForAPI）、<code class="inline">src/utils/zodToJsonSchema.ts</code>（Zod 转 JSON Schema）、<code class="inline">src/services/api/claude.ts</code>（每轮构造 toolSchemas）、<code class="inline">src/services/tools/toolExecution.ts</code>（runToolUse、safeParse、InputValidationError、buildSchemaNotSentHint）、<code class="inline">src/services/tools/toolOrchestration.ts</code>（调度前也用 safeParse 判断并发安全）、<code class="inline">src/services/tools/StreamingToolExecutor.ts</code>（流式工具执行时也先找工具和 parse）、<code class="inline">src/utils/toolErrors.ts</code>（formatZodValidationError）、<code class="inline">src/utils/messages.ts</code>（流式 input_json_delta 解析和 tool input normalize）、<code class="inline">src/components/messages/AssistantToolUseMessage.tsx</code>（展示层 safeParse）。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-selection-scoring-ranking">
+          <div class="section-header"><div class="index">CT3</div><h2>Claude Code 里多工具都能完成同一子任务时怎么选择，是否有打分或排序模块</h2></div>
+          <p>结论先说：<strong>Claude Code 没有一个通用的“多工具候选打分器/排序器”来替模型决定用哪个工具完成子任务。</strong>大多数情况下，工具选择发生在模型侧：Claude 看到系统提示、工具描述、tool schema、当前上下文，然后自己发出某个 <code class="inline">tool_use</code>。Claude Code 运行时主要负责“暴露哪些工具、约束哪些工具、校验和执行工具”，而不是在本地为同一子任务做全局最优工具路由。</p>
+          <div class="callout"><strong>一句话：</strong>Claude Code 的工具选择策略是 <code class="inline">prompt/schema 引导 + 工具池过滤 + ToolSearch 局部检索排序 + 权限/失败反馈纠偏</code>，不是一个独立 planner/ranker 模块。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 真正选工具的是模型，不是本地 router</h3>
+              <p><code class="inline">query.ts</code> 收到模型输出的 <code class="inline">tool_use</code> 后，只是收集 <code class="inline">ToolUseBlock</code>，再交给 <code class="inline">runTools()</code> / <code class="inline">runToolUse()</code> 执行。</p>
+              <p><code class="inline">runToolUse()</code> 的第一步是 <code class="inline">findToolByName(tools, toolUse.name)</code>。也就是说：模型已经给出了工具名，本地不是在多个候选里重新选择一个，而是按名字查找并执行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 工具池会先被过滤，但不是按任务打分</h3>
+              <p><code class="inline">tools.ts</code> 里 <code class="inline">getAllBaseTools()</code>、<code class="inline">getTools()</code>、<code class="inline">assembleToolPool()</code> 决定本轮有哪些工具能出现在模型上下文里。</p>
+              <p>过滤条件包括 simple mode、REPL mode、feature flag、工具 <code class="inline">isEnabled()</code>、permission deny rules、MCP 工具合并去重等。这是在决定“模型能看见哪些工具”，不是对当前子任务计算“哪个工具最好”。</p>
+            </article>
+          </div>
+
+          <p>如果抽象成流程，是这样：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><code class="inline">getAllBaseTools()</code> 收集内置工具：Bash、Read、Edit、Write、Grep、Agent、Todo、WebFetch 等。</div>
+            <div class="flow-step" data-step="2"><code class="inline">getTools()</code> 根据模式、feature、deny rule、是否启用过滤工具。</div>
+            <div class="flow-step" data-step="3"><code class="inline">assembleToolPool()</code> 合并内置工具和 MCP 工具，并按名称排序，主要为了 prompt cache 稳定。</div>
+            <div class="flow-step" data-step="4"><code class="inline">toolToAPISchema()</code> 把每个工具的描述和 schema 发给模型。</div>
+            <div class="flow-step" data-step="5">模型根据工具描述和任务上下文生成 <code class="inline">tool_use.name</code>。</div>
+            <div class="flow-step" data-step="6"><code class="inline">runToolUse()</code> 按名字执行该工具；失败则返回错误 <code class="inline">tool_result</code>，下一轮模型纠偏。</div>
+          </div>
+
+          <pre><code>没有看到这种通用模块：
+subtask = "搜索某个函数定义"
+candidates = [Grep, Glob, Bash(rg), Agent, LSP]
+scores = rank(candidates, subtask)
+chosen = argmax(scores)
+execute(chosen)
+
+源码里更接近这样：
+tools = assembleToolPool(permissionContext, mcpTools)
+toolSchemas = tools.map(toolToAPISchema)
+assistant = callModel(messages, toolSchemas)
+for toolUse in assistant.tool_use_blocks:
+  tool = findToolByName(tools, toolUse.name)
+  runToolUse(tool, toolUse.input)</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>3. 有排序，但不是语义工具选择排序</h3>
+              <p><code class="inline">assembleToolPool()</code> 会把 built-in tools 和 MCP tools 各自按 <code class="inline">tool.name.localeCompare()</code> 排序，再用 <code class="inline">uniqBy(..., 'name')</code> 去重。</p>
+              <p>源码注释说明这个排序主要是为了 prompt-cache 稳定：built-ins 保持连续前缀，避免 MCP 工具插入导致缓存 key 抖动。它不是“Read 比 Bash 分高”这种任务语义排序。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 有打分，但只在 ToolSearch 里</h3>
+              <p>真正有 <code class="inline">score</code> 的地方是 <code class="inline">ToolSearchTool</code>。它只解决一个问题：当工具太多或 MCP 工具被 deferred 时，模型先用 <code class="inline">ToolSearch</code> 按关键词找可能相关的 deferred tools。</p>
+              <p><code class="inline">searchToolsWithKeywords()</code> 会对工具名、MCP server/action 名、<code class="inline">searchHint</code>、工具 prompt description 做关键词匹配并加分，然后按 <code class="inline">score</code> 降序返回前 N 个匹配。</p>
+            </article>
+            <article class="mini-card">
+              <h3>5. ToolSearch 的分数怎么来的</h3>
+              <p>大致权重是：工具名 part 精确命中分最高，MCP 工具名命中权重更高；part 包含次之；<code class="inline">searchHint</code> 命中再加分；description 命中加较低分。还支持 <code class="inline">+term</code> 表示 required term，必须匹配才进入候选。</p>
+              <p>但这个分数只用于“找出哪些 deferred 工具 schema 应该加载”，不是用于执行时在 Read/Grep/Bash/Agent 之间做最终选择。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. select: 是直接选择，不是排序</h3>
+              <p><code class="inline">ToolSearch</code> 支持 <code class="inline">select:Read,Edit,Grep</code> 这种形式。源码里会按名字找 deferred tools 或已加载工具，找到就返回 tool_reference。</p>
+              <p>这相当于模型明确说“我要加载这些工具”，不是 Claude Code 本地判断“这个子任务最适合这些工具”。</p>
+            </article>
+          </div>
+
+          <p>所以，Claude Code 处理“多个工具都能做”的主要方式是把选择策略写进 prompt，而不是写成算法 ranker：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>7. 系统提示里有偏好规则</h3>
+              <p><code class="inline">constants/prompts.ts</code> 里有非常直接的偏好：读文件用 <code class="inline">Read</code> 而不是 <code class="inline">cat/head/tail/sed</code>；编辑文件用 <code class="inline">Edit</code> 而不是 <code class="inline">sed/awk</code>；创建文件用 <code class="inline">Write</code> 而不是 heredoc/echo；找文件用 <code class="inline">Glob</code>，搜内容用 <code class="inline">Grep</code>。</p>
+              <p>这类规则本质是给模型的 tool-use policy。模型遵守得好，就会优先用专用工具；遵守不好，本地权限、校验和错误结果再纠偏。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. 各工具 prompt 也写了适用边界</h3>
+              <p>例如 <code class="inline">AgentTool/prompt.ts</code> 写明：如果只是读某个明确文件路径，用 <code class="inline">Read</code>，不要用 Agent；如果只在 2-3 个文件里搜，也用 <code class="inline">Read</code>；开放式多轮搜索才考虑 Agent。</p>
+              <p><code class="inline">GlobTool</code> / <code class="inline">GrepTool</code> prompt 也提示：开放式搜索、可能需要多轮 grep/glob 时，用 Agent。<code class="inline">WebFetchTool</code> prompt 说 GitHub URL 优先用 Bash 里的 <code class="inline">gh</code> CLI，若 MCP web fetch 可用则优先 MCP。</p>
+            </article>
+            <article class="mini-card">
+              <h3>9. 权限系统会间接改变选择</h3>
+              <p>如果某个工具被 deny rule 过滤掉，模型根本看不到；如果某个工具调用被用户拒绝或 hook 拒绝，Claude Code 会返回错误 <code class="inline">tool_result</code>，系统提示还要求不要重复同一个被拒绝调用，而要调整 approach。</p>
+              <p>这不是预先打分，而是运行时反馈驱动：工具不可用或失败后，下一轮模型重新选择。</p>
+            </article>
+            <article class="mini-card">
+              <h3>10. 并发调度也不是选择策略</h3>
+              <p><code class="inline">toolOrchestration.ts</code> 会用 <code class="inline">isConcurrencySafe()</code> 把工具分成并发安全批次和串行批次；<code class="inline">StreamingToolExecutor</code> 也会控制流式工具并发。</p>
+              <p>这解决的是“已经选好的多个工具怎么执行”，不是“同一子任务多个工具谁更好”。</p>
+            </article>
+          </div>
+
+          <p>一个具体例子：要找 <code class="inline">runToolUse</code> 的实现，候选看起来有 <code class="inline">Grep</code>、<code class="inline">Bash(rg)</code>、<code class="inline">Agent</code>、<code class="inline">LSP</code>。Claude Code 不会本地给四个候选打分。它会把工具说明发给模型；系统提示告诉模型搜内容用 <code class="inline">Grep</code> 而不是 shell grep，开放式多轮调查可用 Agent；如果模型调用 <code class="inline">Grep</code>，运行时执行 Grep；如果模型误用 Bash，也主要靠 prompt、权限和失败反馈纠正，而不是本地强行改成 Grep。</p>
+
+          <div class="callout">最短总结：<strong>Claude Code 有“工具发现排序”而没有“通用工具选择打分器”。</strong><code class="inline">ToolSearch</code> 会给 deferred tools 做关键词打分排序；但普通 Read/Grep/Bash/Agent/Edit 之间的选择，主要由模型根据工具描述和系统提示决定，Claude Code 本地只做可用性过滤、schema 校验、权限控制、执行调度和失败反馈。</div>
+          <div class="refs">参考文件：<code class="inline">src/tools.ts</code>（工具池构建、过滤、按名称排序、MCP 合并）、<code class="inline">src/Tool.ts</code>（findToolByName、toolMatchesName、searchHint）、<code class="inline">src/services/api/claude.ts</code>（filteredTools、toolSchemas、defer_loading）、<code class="inline">src/utils/api.ts</code>（toolToAPISchema）、<code class="inline">src/tools/ToolSearchTool/ToolSearchTool.ts</code>（searchToolsWithKeywords、score 排序、select 直选）、<code class="inline">src/tools/ToolSearchTool/prompt.ts</code>（deferred tool 和 query forms）、<code class="inline">src/utils/toolSearch.ts</code>（ToolSearch 开关、阈值、discovered tool extraction）、<code class="inline">src/constants/prompts.ts</code>（专用工具优先规则）、<code class="inline">src/services/tools/toolOrchestration.ts</code>、<code class="inline">src/services/tools/StreamingToolExecutor.ts</code>。</div>
         </section>
 
 
