@@ -935,10 +935,11 @@
         <details class="toc-group" id="openDeepResearchTocGroup" open>
           <summary>
             <span class="toc-group-title">Open Deep Research Agent</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#open-deep-research-overview">01 · 概览介绍 Open Deep Research Agent</a>
+            <a href="#open-deep-research-vs-hermes-gaia">02 · 为什么 Deep Research Agent 在 GAIA 上更容易打过 Hermes 这类通用 Agent</a>
           </div>
         </details>
         <details class="toc-group" id="claudeWorkflowTocGroup" open>
@@ -4958,6 +4959,67 @@ print(answer)</code></pre>
 
           <div class="callout">最短总结：<strong>Open Deep Research Agent = smolagents 上构建的研究型双层 agent。</strong>上层 <code class="inline">CodeAgent</code> 管全局推理和答案整合；下层 <code class="inline">ToolCallingAgent</code> 管网页研究；浏览器、文件转换、视觉问答、归档网页和 GAIA 评测脚本共同组成一个面向复杂研究任务的可复现实验系统。</div>
           <div class="refs">本地源码：<code class="inline">/root/open_deep_research/examples/open_deep_research</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">run.py</code>、<code class="inline">run_gaia.py</code>、<code class="inline">app.py</code>、<code class="inline">scripts/text_web_browser.py</code>、<code class="inline">scripts/text_inspector_tool.py</code>、<code class="inline">scripts/run_agents.py</code>、<code class="inline">scripts/reformulator.py</code>、<code class="inline">scripts/visual_qa.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="open-deep-research-vs-hermes-gaia">
+          <div class="section-header"><div class="index">ODR2</div><h2>为什么 Deep Research Agent 在 GAIA 上更容易打过 Hermes 这类通用 Agent</h2></div>
+          <p>先把结论说准：从服务器源码看，<strong>Open Deep Research Agent 更适合 GAIA，不是因为它抽象上一定比 Hermes 更高级，而是因为它把整个应用链路都按 GAIA 的出题形态做了专门优化</strong>。Hermes 的源码重点是通用个人/云端 agent、skills、memory、gateway、terminal backend 和 Atropos RL 环境；它有 <code class="inline">WebResearchEnv</code>，但默认训练集是 <code class="inline">google/frames-benchmark</code>，目标是训练多步网页研究能力，不是直接做 GAIA 评测 harness。</p>
+          <div class="callout"><strong>一句话：</strong>GAIA 不是普通“会上网就行”的 benchmark。它经常要求网页查证、文件读取、图片理解、历史网页、精确短答案格式。Open Deep Research Agent 把这些点做成了<strong>专门的双层 agent + 文本浏览器 + 附件预处理 + 最终答案重写器</strong>；Hermes 更像一个通用 agent/RL 基座，默认 web research 环境没有这些 GAIA 专用补丁。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 目标不同：ODR 是 GAIA 应用，Hermes 是通用 Agent/RL 基座</h3>
+              <p>Open Deep Research 的 <code class="inline">README.md</code> 明确说它是 Deep Research 的开源复刻，并直接报告 GAIA validation 表现。<code class="inline">run_gaia.py</code> 也直接加载 <code class="inline">gaia-benchmark/GAIA</code> 或 <code class="inline">smolagents/GAIA-annotated</code>，保存 <code class="inline">prediction</code>、<code class="inline">true_answer</code>、<code class="inline">intermediate_steps</code>。</p>
+              <p>Hermes 的 <code class="inline">environments/web_research_env.py</code> 则写的是“RL Environment for Multi-Step Web Research”，默认 dataset 是 <code class="inline">google/frames-benchmark</code>，reward 是 correctness、tool usage、efficiency、source diversity。它适合训练研究能力，但不是 GAIA 定制提交器。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 架构不同：ODR 双层分工，Hermes 默认单循环工具调用</h3>
+              <p>ODR 在 <code class="inline">run.py</code> / <code class="inline">run_gaia.py</code> 里创建两层：上层 <code class="inline">CodeAgent</code> 是 manager，负责全局推理、调用视觉/文档工具、整合答案；下层 <code class="inline">ToolCallingAgent</code> 叫 <code class="inline">search_agent</code>，专门负责搜索和网页导航。</p>
+              <p>Hermes 的 <code class="inline">HermesAgentLoop</code> 是标准 OpenAI tool calling 循环：每轮把 <code class="inline">tools=</code> 传给模型，模型返回 <code class="inline">tool_calls</code>，框架校验工具名、解析 JSON 参数、执行工具、把 tool result 放回 messages。这个架构很通用，但默认没有“研究经理 + 搜索专家”的强分工。</p>
+            </article>
+          </div>
+
+          <p>真正拉开 GAIA 表现的关键点可以拆成下面几类：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>GAIA 附件处理。</strong>ODR 的 <code class="inline">scripts/run_agents.py</code> 会按扩展名处理图片、pdf、xls/xlsx、doc/docx、xml、音频、zip。zip 会先解压，再逐个文件生成描述。很多 GAIA 题不是纯网页题，而是“问题 + 附件”。这一步直接提高命中率。</div>
+            <div class="flow-step" data-step="2"><strong>视觉 + 文档双工具。</strong>ODR 用 <code class="inline">visualizer</code> 做图片问答，用 <code class="inline">TextInspectorTool</code> 把文档转成 markdown/text 并让模型围绕问题摘要或回答。Hermes 有视觉、文件、浏览器工具，但 <code class="inline">WebResearchEnv</code> 默认只启用 <code class="inline">web</code>、<code class="inline">file</code>，并没有 GAIA 附件预处理链路。</div>
+            <div class="flow-step" data-step="3"><strong>文本浏览器更贴合长网页查证。</strong>ODR 的 <code class="inline">SimpleTextBrowser</code> 维护 address、history、title、viewport_pages、当前页，并提供 <code class="inline">page_down</code>、<code class="inline">page_up</code>、<code class="inline">find_on_page_ctrl_f</code>、<code class="inline">find_next</code>。它让 agent 像人查网页：搜索 → 打开 → 页内 Ctrl+F → 翻页定位。</div>
+            <div class="flow-step" data-step="4"><strong>历史网页能力。</strong>ODR 有 <code class="inline">ArchiveSearchTool</code>，输入 URL 和日期去 Wayback Machine 找接近日期的历史快照。GAIA 题经常问过去某个时间点的事实，普通 live search 容易查到现在状态而答错。</div>
+            <div class="flow-step" data-step="5"><strong>搜索任务被封装成 managed agent。</strong>ODR 明确告诉 <code class="inline">search_agent</code>：需要浏览网页的问题都交给你；调用时要给完整自然语言任务，不要只给关键词；如果需要时间范围要给上下文。这样 manager 不必每次自己决定底层搜索动作，降低全局推理被网页细节污染的概率。</div>
+            <div class="flow-step" data-step="6"><strong>最终答案格式重写。</strong>GAIA scoring 很看最终短答案。ODR 的 <code class="inline">scripts/reformulator.py</code> 会读取完整 agent 轨迹，然后强制输出 <code class="inline">FINAL ANSWER: ...</code>，并要求数字用数字、尽量少词、逗号列表按要求、不带多余标点。Hermes <code class="inline">WebResearchEnv</code> 的 prompt 要求“2-4 sentences”和 cite sources，这对训练研究能力合理，但直接拿去 GAIA exact answer 可能吃亏。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>ODR 的强项：benchmark harness 做满</h3>
+              <p>它的问题增强很硬：<code class="inline">run_gaia.py</code> 会把原题改成“必须找到正确答案、不要 None found、必要时验证”，然后把附件描述拼进去。跑完 agent 后再用 <code class="inline">prepare_response()</code> 从轨迹里抽取最终答案。这相当于前处理、执行、后处理都围绕 GAIA 优化。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Hermes 的强项：训练和系统能力更强</h3>
+              <p>Hermes 更强的是长期系统工程：skills、自我改进、memory、gateway、多平台通信、terminal sandbox、tool result persistence、Atropos RL。比如 <code class="inline">tool_result_storage.py</code> 会把超大工具结果写进 sandbox，只给模型返回 preview + 文件路径，防止上下文爆掉。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Hermes 在 GAIA 上的默认短板</h3>
+              <p>默认 <code class="inline">WebResearchEnv</code> 是通用 web research RL：要求查至少两个来源、引用来源、2-4 句回答，并用 LLM judge 打分。这和 GAIA 的“短答案/精确匹配/附件多模态/历史网页”不完全同构。不是 Hermes 不能做，而是源码里的默认路径还没把 GAIA 特化做到 ODR 这种程度。</p>
+            </article>
+            <article class="mini-card">
+              <h3>ODR 的代价</h3>
+              <p>ODR 更像一个比赛/评测定制系统：依赖 Serper/SerpAPI、OpenAI 或 LiteLLM 模型、HF token、GAIA 数据集权限、手工/半手工附件增强。它没有 Hermes 那种长期个人 agent、skills 生态、gateway、多 terminal backend 的完整平台能力。</p>
+            </article>
+          </div>
+
+          <p>如果用一个具体 GAIA 题来理解，差异很明显：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">题目带一个 pdf 或 xlsx 附件。ODR 先在 <code class="inline">get_single_file_description()</code> 里判断文件类型：如果有同名 png 截图，优先走视觉描述；否则用 <code class="inline">TextInspectorTool.forward_initial_exam_mode()</code> 转文本并生成与问题相关的 5 句说明。</div>
+            <div class="flow-step" data-step="2">manager <code class="inline">CodeAgent</code> 拿到“原题 + 附件说明”，决定哪些信息来自附件，哪些需要网页核验。</div>
+            <div class="flow-step" data-step="3">需要网页时，manager 把任务交给 <code class="inline">search_agent</code>。search_agent 用搜索、visit_page、Ctrl+F、翻页、Wayback 归档等工具找证据，并返回 summary。</div>
+            <div class="flow-step" data-step="4">manager 汇总附件证据和网页证据，得到候选答案。然后 <code class="inline">prepare_response()</code> 根据完整轨迹二次抽取成 GAIA 想要的最短最终答案。</div>
+            <div class="flow-step" data-step="5">Hermes 默认 web research 路径更可能是：模型在单个 tool-calling loop 里调用 <code class="inline">web_search</code> / <code class="inline">web_extract</code>，输出带来源的几句研究答案。这个答案对人类可读，但未必符合 GAIA scorer 的短答案格式。</div>
+          </div>
+
+          <div class="callout"><strong>最终判断：</strong>ODR 在 GAIA 上更容易好，是<strong>任务适配胜利</strong>：专门数据集入口、附件预处理、多模态工具、文本浏览器、Wayback、搜索子 agent、答案 reformulator。Hermes 的优势是<strong>平台和训练基建</strong>：如果要让 Hermes 打 GAIA，应把 ODR 这套 GAIA harness 移植进去，再用 Hermes 的 RL 环境对 GAIA/GAIA-like 任务做 reward training，而不是直接拿通用 web research prompt 去比。</div>
+          <div class="refs">Open Deep Research 参考：<code class="inline">/root/open_deep_research/examples/open_deep_research/README.md</code>、<code class="inline">run.py</code>、<code class="inline">run_gaia.py</code>、<code class="inline">scripts/run_agents.py</code>、<code class="inline">scripts/text_web_browser.py</code>、<code class="inline">scripts/text_inspector_tool.py</code>、<code class="inline">scripts/reformulator.py</code>、<code class="inline">scripts/visual_qa.py</code>。Hermes 参考：<code class="inline">/root/hermes/README.md</code>、<code class="inline">environments/web_research_env.py</code>、<code class="inline">environments/agent_loop.py</code>、<code class="inline">environments/hermes_base_env.py</code>、<code class="inline">environments/tool_context.py</code>、<code class="inline">tools/web_tools.py</code>、<code class="inline">tools/tool_result_storage.py</code>。</div>
         </section>
 
         <section class="section reveal" id="claude-workflow-1">
