@@ -914,7 +914,7 @@
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
-            <a href="#fastapply-qwen3-4b-pipeline-report">02 · FastApply Pipeline 复刻训练报告</a>
+            <a href="#fastapply-qwen3-4b-pipeline-report">02 · FastApply GRPO 完整复刻报告</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1147,56 +1147,66 @@ Okay, let's see. The question is</code></pre>
         </section>
 
         <section class="section reveal" id="fastapply-qwen3-4b-pipeline-report">
-          <div class="section-header"><div class="index">02</div><h2>FastApply Pipeline 复刻：Qwen3 4B MinT 训练报告</h2></div>
-          <p>这次训练专注复刻图片里的 FastApply / AI Coding Apply pipeline：输入 <code class="inline">source + patch</code>，模型直接输出 <code class="inline">&lt;updated&gt;完整更新后源码&lt;/updated&gt;</code>。数据先不扩展，只用 2 条 tiny test 数据验证端到端链路。</p>
+          <div class="section-header"><div class="index">02</div><h2>FastApply GRPO 完整复刻：Qwen3 4B MinT 训练报告</h2></div>
+          <p>你指出得对：上一版只是 SFT smoke test，不是图片里的完整 pipeline。现在已按 18 张图重新复刻：<strong>source + patch → 采样 rollouts → FastApply verifier reward → group-relative advantages → <code class="inline">loss_fn=&quot;importance_sampling&quot;</code> 的 GRPO 训练</strong>。数据仍然只用 1–2 条 tiny test 样本，不扩造大数据。</p>
 
           <div class="grid-2">
             <article class="mini-card">
-              <h3>图片 pipeline 复刻范围</h3>
+              <h3>18 张图对应的 pipeline</h3>
               <ul>
-                <li>任务：代码 Apply，把 patch 合并进原始 source。</li>
-                <li>格式：SEARCH/REPLACE、structured changes，目标统一成 updated full source。</li>
-                <li>数据流：Git diff / patch → 结构化样本 → 过滤/去重/AST 边界预留 → SFT record。</li>
-                <li>训练：先做 SFT；GRPO-like reward 作为后续阶段预留。</li>
-                <li>服务化：训练后保存 LoRA，并用采样验证模型是否能输出更新后代码。</li>
+                <li>Apply 任务：把 patch 合并进 source，输出完整更新后代码。</li>
+                <li>Prompt contract：只输出 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code>，不要解释、不要 Markdown fence、不要冲突标记。</li>
+                <li>Patch 形式：SEARCH/REPLACE、structured changes、unified diff/AST 变更都预留。</li>
+                <li>数据构造：Git commit/diff → old/new source → patch replay 校验 → 过滤 → 去重 → AST 顶层作用域检查。</li>
+                <li>训练核心：不是只做 SFT，而是用 verifier reward 做 <strong>GRPO</strong>。</li>
+                <li>服务化：训练后保存 LoRA sampler，并用同一 Apply prompt 做采样验证。</li>
               </ul>
             </article>
             <article class="mini-card">
-              <h3>本次 MinT 配置</h3>
+              <h3>代码模块</h3>
               <ul>
-                <li>时间：2026-05-17 16:39–16:53 UTC</li>
-                <li>模型：<code class="inline">Qwen/Qwen3-4B-Instruct-2507</code></li>
-                <li>算法：SFT / <code class="inline">cross_entropy</code></li>
-                <li>LoRA：rank 16，训练 MLP / Attention / Unembed</li>
-                <li>样本：2 条 tiny Apply test 数据</li>
-                <li>run name：<code class="inline">fastapply-qwen3-4b-tiny-2026-05-17-v2</code></li>
+                <li><code class="inline">patching.py</code>：SEARCH/REPLACE 与 structured changes 回放。</li>
+                <li><code class="inline">filters.py</code>：尺寸、patch replay、AST/syntax、dedupe 过滤。</li>
+                <li><code class="inline">ast_tools.py</code>：Python AST 与 JS 顶层符号分析。</li>
+                <li><code class="inline">rewards.py</code>：exact、similarity、tag、no-extra-prose、syntax verifier。</li>
+                <li><code class="inline">grpo.py</code>：reward centering，生成 <code class="inline">weights/logprobs/advantages</code>。</li>
+                <li><code class="inline">train_mint_fastapply_grpo.py</code>：MinT GRPO 主训练循环。</li>
               </ul>
             </article>
           </div>
 
           <div class="flow">
-            <div class="flow-step" data-step="1">根据 18 张图整理 FastApply 的核心 contract：不得解释、不得 Markdown fence、只输出 <code class="inline">&lt;updated&gt;</code> 标签包裹的新源码。</div>
-            <div class="flow-step" data-step="2">实现数据构造模块：<code class="inline">fastapply_pipeline/build_dataset.py</code> 生成 <code class="inline">data/fastapply_tiny_sft.jsonl</code>。</div>
-            <div class="flow-step" data-step="3">实现训练模块：<code class="inline">fastapply_pipeline/train_mint_fastapply.py</code> 将 prompt/response 转成 MinT <code class="inline">types.Datum</code>，只在 response token 上计算 loss。</div>
-            <div class="flow-step" data-step="4">使用 Qwen3 4B 跑 1 个远程 MinT SFT step，并保存 LoRA 后采样验证。</div>
+            <div class="flow-step" data-step="1">从 tiny Apply 数据构造 prompt：<code class="inline">&lt;language&gt;</code>、<code class="inline">&lt;source&gt;</code>、<code class="inline">&lt;patch&gt;</code>。</div>
+            <div class="flow-step" data-step="2">保存当前 LoRA 权重拿 sampler，对同一 prompt 采样 policy rollout。</div>
+            <div class="flow-step" data-step="3">用 FastApply verifier 打分，并对同组 reward 做中心化：<code class="inline">advantage = reward - mean_reward</code>。</div>
+            <div class="flow-step" data-step="4">构造 MinT RL Datum：prompt 权重为 0，response 权重为 1，同时填入 sampled <code class="inline">logprobs</code> 和 <code class="inline">advantages</code>。</div>
+            <div class="flow-step" data-step="5">调用 <code class="inline">forward_backward(..., loss_fn=&quot;importance_sampling&quot;)</code>，再 <code class="inline">optim_step</code>，完成 GRPO 更新。</div>
           </div>
 
           <div class="grid-2">
             <article class="mini-card">
-              <h3>训练指标</h3>
+              <h3>本次 GRPO 配置与指标</h3>
               <ul>
-                <li>状态：<strong>completed</strong></li>
-                <li>耗时：803.74 秒</li>
-                <li>token lengths：289、236</li>
-                <li><code class="inline">loss:mean</code>：9.436356393914474e-06</li>
-                <li><code class="inline">num_samples:sum</code>：2.0</li>
-                <li><code class="inline">num_tokens:sum</code>：114.0</li>
-                <li><code class="inline">grad_norm:last</code>：0.18731829524040222</li>
+                <li>时间：2026-05-17 17:52–18:32 UTC</li>
+                <li>模型：<code class="inline">Qwen/Qwen3-4B-Instruct-2507</code></li>
+                <li>算法：<strong>GRPO / <code class="inline">importance_sampling</code></strong></li>
+                <li>LoRA：rank 16，训练 MLP / Attention / Unembed</li>
+                <li>policy samples：1；tiny smoke 中额外加入 1 条 oracle rollout 保证 advantage 非退化</li>
+                <li>GRPO datums：2；response tokens：145</li>
+                <li><code class="inline">loss:mean</code>：0.0001722524906026906</li>
+                <li><code class="inline">ratio:mean</code>：0.9999952912330627</li>
+                <li><code class="inline">grad_norm:last</code>：17516.17578125</li>
+                <li>run name：<code class="inline">fastapply-grpo-qwen3-4b-tiny-2026-05-17-v2</code></li>
               </ul>
             </article>
             <article class="mini-card">
-              <h3>采样验证</h3>
-              <p>样本：<code class="inline">py-search-replace-cache</code>。训练后输出正确生成了带 cache 参数的新函数：</p>
+              <h3>Reward / Advantage</h3>
+              <ul>
+                <li>policy rollout reward：0.95，advantage：-0.025（内容正确，但多了 <code class="inline">&lt;|endoftext|&gt;</code>，no-extra-prose 扣分）。</li>
+                <li>oracle rollout reward：1.0，advantage：+0.025。</li>
+                <li>reward 由 exact match、相似度、updated 标签、无额外文本、语法合法性组成。</li>
+              </ul>
+              <p>GRPO 后采样仍能输出正确更新后的函数：</p>
               <pre><code>&lt;updated&gt;
 def fetch_user(user_id, client, cache=None):
     if cache is not None and user_id in cache:
@@ -1210,8 +1220,8 @@ def fetch_user(user_id, client, cache=None):
             </article>
           </div>
 
-          <div class="callout">结论：FastApply pipeline 已按图片思路完成最小复刻，并在 MinT 上用 Qwen3 4B 跑通 source+patch → updated source 的 SFT 训练、LoRA 保存和采样验证。当前还不是大规模正式训练，后续只需要把 tiny fixture 换成真实 Git diff 数据即可扩展。</div>
-          <div class="refs">代码与报告：<code class="inline">/root/rlhf/fastapply_pipeline/</code>、<code class="inline">/root/rlhf/data/fastapply_tiny_sft.jsonl</code>、<code class="inline">/root/rlhf/reports/fastapply_mint_training_report.json</code>。</div>
+          <div class="callout">结论：现在的版本已经不是 SFT 版，而是按图片补齐了 FastApply 的数据构造、patch replay、过滤去重、AST 边界、verifier reward、GRPO advantage 和 MinT <code class="inline">importance_sampling</code> 训练。当前只用 tiny test 数据验证链路，后续扩展时直接把真实 Git diff 数据接到同一 pipeline。</div>
+          <div class="refs">代码与报告：<code class="inline">/root/rlhf/fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/grpo.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>、<code class="inline">/root/rlhf/reports/fastapply_grpo_training_report.json</code>。</div>
         </section>
 
 
