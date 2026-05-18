@@ -910,11 +910,12 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
             <a href="#fastapply-qwen3-4b-pipeline-report">02 · FastApply GRPO 完整复刻报告</a>
+            <a href="#fastapply-lora-grpo-details">03 · LoRA 插入位置与 GRPO 训练精髓</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1222,6 +1223,75 @@ def fetch_user(user_id, client, cache=None):
 
           <div class="callout">结论：这个问题已改成 GRPO 版，按图片补齐了 FastApply 的数据构造、patch replay、过滤去重、AST 边界、verifier reward、GRPO advantage 和 MinT <code class="inline">importance_sampling</code> 训练。当前只用 tiny test 数据验证链路，后续扩展时直接把真实 Git diff 数据接到同一 pipeline。</div>
           <div class="refs">代码与报告：<code class="inline">/root/rlhf/fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/grpo.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>、<code class="inline">/root/rlhf/reports/fastapply_grpo_training_report.json</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-lora-grpo-details">
+          <div class="section-header"><div class="index">03</div><h2>LoRA 插在哪个架构之间，GRPO 训练精髓是什么</h2></div>
+          <p>这次 FastApply 训练里，LoRA 不是“额外插一层大模型”，而是挂在 Qwen3 4B Transformer 里的关键线性投影上；GRPO 也不是普通监督学习，而是让同一个 prompt 采样出一组候选，用 reward 排出组内相对好坏，再更新模型概率。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>LoRA 到底插在哪里</h3>
+              <p>直观讲，LoRA 插在每个目标 Linear 的原始权重旁边，形成一条低秩旁路：</p>
+              <pre><code>原始 Linear: y = W x
+LoRA 后:    y = W x + scale · B(Ax)</code></pre>
+              <p>所以它不是夹在两个 Transformer block 中间，而是嵌进 block 内部的投影层。</p>
+              <ul>
+                <li><strong>Attention 内部</strong>：通常对应 <code class="inline">q_proj / k_proj / v_proj / o_proj</code>。</li>
+                <li><strong>MLP 内部</strong>：通常对应 <code class="inline">gate_proj / up_proj / down_proj</code>。</li>
+                <li><strong>输出层</strong>：本次 MinT 参数 <code class="inline">train_unembed=True</code>，所以输出到词表的 unembed / lm head 也参与 LoRA 更新。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>本次对应的 MinT 配置</h3>
+              <pre><code>training_client = service_client.create_lora_training_client(
+    base_model="Qwen/Qwen3-4B-Instruct-2507",
+    rank=16,
+    train_mlp=True,
+    train_attn=True,
+    train_unembed=True,
+)</code></pre>
+              <p>含义是：冻结 Qwen3 4B 大部分原始权重，只训练 rank=16 的低秩增量。这样显存、通信和优化状态都小很多，但仍能改变 attention 路由、MLP 变换和最终 token 分布。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>采样。</strong>先把当前 LoRA 权重保存成 sampler，对同一个 <code class="inline">source + patch</code> prompt 采样一组候选更新代码。</div>
+            <div class="flow-step" data-step="2"><strong>打分。</strong>FastApply verifier 检查输出是否只有 <code class="inline">&lt;updated&gt;</code>、代码是否等于 gold、语法是否可解析、有没有多余文本。</div>
+            <div class="flow-step" data-step="3"><strong>组内归一。</strong>同组 reward 做中心化：<code class="inline">advantage = reward - mean_reward</code>。不是看绝对分，而是看这一组里谁更好。</div>
+            <div class="flow-step" data-step="4"><strong>更新概率。</strong>高 advantage 的轨迹提高概率，低 advantage 的轨迹降低概率；MinT 用 <code class="inline">loss_fn=&quot;importance_sampling&quot;</code> 执行这一步。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>GRPO 一轮采样几个</h3>
+              <ul>
+                <li>常规建议：每个 prompt 一个 group，<strong>group size 通常 4–16</strong>，常见先用 4 或 8。</li>
+                <li>样本越多，组内相对优势越稳定，但采样和训练成本越高。</li>
+                <li>本次 tiny smoke 为了省时间：<strong>1 个 policy sample + 1 个 oracle rollout</strong>，最后形成 2 个 GRPO datums。</li>
+                <li>之前试过 2 个 policy samples + oracle，Qwen3 4B 远程训练耗时明显变长，所以 smoke 版压缩了 group。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>Datum 里最关键的字段</h3>
+              <ul>
+                <li><code class="inline">target_tokens</code>：下一 token teacher-forcing 目标。</li>
+                <li><code class="inline">weights</code>：prompt 部分为 0，只训练 response token。</li>
+                <li><code class="inline">logprobs</code>：采样时旧策略给出的 token logprob，用于 importance ratio。</li>
+                <li><code class="inline">advantages</code>：同一个 response 的 advantage 复制到它的每个生成 token 上。</li>
+              </ul>
+              <pre><code>loss_fn_inputs = {
+  "target_tokens": full[1:],
+  "weights": [0]*prompt + [1]*response,
+  "logprobs": old_policy_logprobs,
+  "advantages": centered_advantages,
+}</code></pre>
+            </article>
+          </div>
+
+          <div class="callout">训练精髓一句话：<strong>LoRA 决定“改哪些小参数”，GRPO 决定“哪些生成轨迹值得被提高概率”。</strong> 对 FastApply 来说，reward 不奖励会聊天，而奖励严格、可解析、无多余文本、能正确合并 patch 的代码输出。</div>
+          <div class="refs">对应代码：<code class="inline">fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">fastapply_pipeline/grpo.py</code>、<code class="inline">fastapply_pipeline/rewards.py</code>。</div>
         </section>
 
 
