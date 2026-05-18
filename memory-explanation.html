@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">10 sections</span>
+            <span class="toc-count">11 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -923,6 +923,7 @@
             <a href="#rl-master-72-image-grpo-migration">08 · 72 张图 RL-master FastApply GRPO 迁移报告</a>
             <a href="#fastapply-project-reward-design">09 · 项目里的 reward 是怎么做的</a>
             <a href="#fastapply-project-loss-definition">10 · 项目里的损失函数咋定义的</a>
+            <a href="#fastapply-reward-fields-deep-dive">11 · reward 每个字段到底什么意思</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1624,6 +1625,143 @@ total_loss = policy_loss + kl_loss - entropy_bonus</code></pre>
 
           <div class="callout">一句话：损失函数的目标是 <strong>让高 reward 的 updated-code 轨迹更可能出现，让低 reward 轨迹更不可能出现，同时用 KL/entropy 控制训练不要跑飞</strong>。</div>
           <div class="refs">参考代码：<code class="inline">fastapply_pipeline/grpo.py</code>、<code class="inline">fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">rl_master/scripts/run_fastapply_grpo_smoke.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-reward-fields-deep-dive">
+          <div class="section-header"><div class="index">11</div><h2>项目里的 reward 每个部分到底是什么意思：updated / exact / similarity / tag_format / no_extra_prose / syntax</h2></div>
+          <p>这次只看项目里的 reward。代码位置是 <code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>。它把模型输出拆成 5 个分项，再加权成总分：</p>
+          <pre><code>total = 0.55 * exact
+      + 0.20 * similarity
+      + 0.10 * tag_format
+      + 0.05 * no_extra_prose
+      + 0.10 * syntax</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>updated 标签是什么</h3>
+              <p><code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code> 是这个 FastApply 任务规定的输出容器。模型不能随便解释，必须把最终更新后的完整代码放在这个标签里：</p>
+              <pre><code>&lt;updated&gt;
+def add(a, b):
+    return a + b + 1
+&lt;/updated&gt;</code></pre>
+              <p>项目先用 <code class="inline">extract_updated_tag(output)</code> 把标签内部代码抽出来。如果抽到了，就拿标签里的内容当 candidate；如果没抽到，就把整个 output 当 candidate。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么要用 updated 标签</h3>
+              <p>因为代码 Apply 场景后面通常要自动接机器流程。如果模型输出“好的，我帮你修改如下：```python ...```”，人能看懂，但程序不好直接 apply。<code class="inline">updated</code> 标签就是机器可解析边界。</p>
+              <ul>
+                <li>标签内：真正要应用的代码。</li>
+                <li>标签外：最好什么都没有。</li>
+                <li>没有标签：格式分会扣，后续自动化风险变高。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>exact 是什么意思</h3>
+              <p><strong>exact</strong> 就是“抽出来的 candidate 是否和标准答案 expected_source 完全一致”。项目里会先做很轻的归一化：</p>
+              <pre><code>normalize_code(text) = text.replace("\r\n", "\n").strip()
+exact = normalize_code(candidate) == normalize_code(expected_source)</code></pre>
+              <p>所以它主要忽略首尾空白和 Windows 换行，但不会宽容代码内容差异。少一行、多一个注释、把 <code class="inline">+1</code> 写成 <code class="inline">+2</code>，一般都是 exact=0。</p>
+            </article>
+            <article class="mini-card">
+              <h3>exact 为什么权重最高</h3>
+              <p>FastApply 的目标不是“答案大概对”，而是 patch 合并后的代码要能精确落地。exact 权重 0.55 最高，表示训练最想鼓励完整、准确、无遗漏地生成目标代码。</p>
+              <div class="callout">如果 exact=1，通常说明核心任务已经完成；其他项更多是在约束格式、语法和输出洁净度。</div>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>similarity 的 difflib 是什么</h3>
+              <p><strong>similarity</strong> 用的是 Python 标准库 <code class="inline">difflib.SequenceMatcher</code>。它会比较两个字符串序列有多少可对齐的相同片段，返回一个 0 到 1 的相似度：</p>
+              <pre><code>similarity = SequenceMatcher(None, candidate, expected).ratio()</code></pre>
+              <ul>
+                <li>1.0：两个文本几乎完全一样。</li>
+                <li>0.8：大部分相同，但有一些插入、删除或替换。</li>
+                <li>接近 0：内容基本不像。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>similarity 有什么用</h3>
+              <p>它是“软分”。如果只用 exact，错一个字符就 0 分，GRPO 早期会很稀疏。similarity 让“接近正确”的输出也有一点信号，比如函数主体大体对但漏了缓存逻辑，它 exact=0，但 similarity 可能还能给 0.7 左右。</p>
+              <p>注意：difflib 只是文本相似，不懂程序语义。两个代码文本很像，不代表行为一定正确；两个代码文本不同，也可能语义等价。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>tag_format 啥意思</h3>
+              <p><strong>tag_format</strong> 只检查能不能抽到 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code>：</p>
+              <pre><code>extracted = extract_updated_tag(output)
+tag_format = 1.0 if extracted is not None else 0.0</code></pre>
+              <p>也就是说，只要标签存在且能被正则抽取，就给 1。它不判断代码对不对，只判断“有没有按协议把代码放进 updated 标签”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>tag_format 和 exact 的区别</h3>
+              <ul>
+                <li><strong>tag_format</strong>：看包装格式。有没有 <code class="inline">updated</code> 标签。</li>
+                <li><strong>exact</strong>：看标签里的代码内容。是否等于标准答案。</li>
+              </ul>
+              <p>所以可能出现：标签写对但代码错，tag_format=1、exact=0；或者代码内容对但没标签，exact 可能因为整个 output 混了文本而变差，tag_format=0。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>no_extra_prose 啥意思</h3>
+              <p><strong>no_extra_prose</strong> 是“没有额外废话”。项目里这样判断：</p>
+              <pre><code>stripped = output.strip()
+no_extra = stripped.startswith("&lt;updated&gt;") \
+        and stripped.endswith("&lt;/updated&gt;")</code></pre>
+              <p>它要求整个输出去掉首尾空白后，开头就是 <code class="inline">&lt;updated&gt;</code>，结尾就是 <code class="inline">&lt;/updated&gt;</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>哪些会扣 no_extra_prose</h3>
+              <pre><code>好的，修改如下：
+&lt;updated&gt;...&lt;/updated&gt;</code></pre>
+              <pre><code>&lt;updated&gt;...&lt;/updated&gt;
+解释：这里修复了缓存逻辑。</code></pre>
+              <pre><code>```python
+&lt;updated&gt;...&lt;/updated&gt;
+```</code></pre>
+              <p>这些都可能 tag_format=1，因为能抽到 updated；但 no_extra_prose=0，因为标签外有解释、Markdown fence 或其他文本。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>syntax 怎么验证</h3>
+              <p><strong>syntax</strong> 调用 <code class="inline">analyze_source(language, candidate)</code>。目前项目里 Python 和 JS/TS 的逻辑不同：</p>
+              <ul>
+                <li>Python：用 <code class="inline">ast.parse(candidate)</code>。能 parse 就 <code class="inline">parse_ok=True</code>，有 <code class="inline">SyntaxError</code> 就 false。</li>
+                <li>JavaScript / TypeScript：现在是轻量 regex，抽 <code class="inline">function</code>、<code class="inline">const/let/var</code> 等顶层符号，默认 parse_ok=True。</li>
+                <li>其他语言：当前也默认 parse_ok=True。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>syntax 能验证代码是否运行报错吗</h3>
+              <p><strong>不能。</strong>当前 syntax 主要验证“语法能不能解析”，不是运行时测试。</p>
+              <ul>
+                <li>能发现：Python 缩进错、括号没闭合、非法语法。</li>
+                <li>不能发现：变量未定义、接口返回错、单测失败、逻辑错误、除零、网络请求失败。</li>
+                <li>JS/TS 当前更弱，因为还没接 tree-sitter / tsc / eslint，只是结构占位。</li>
+              </ul>
+              <div class="callout">所以 syntax=1 只表示“看起来像合法代码”，不表示“运行一定不报错”。要验证运行正确，需要加 unit tests、执行沙箱、type checker 或真实项目测试。</div>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">模型输出原文 <code class="inline">output</code>。</div>
+            <div class="flow-step" data-step="2">抽取 <code class="inline">updated</code> 标签得到 <code class="inline">candidate</code>。</div>
+            <div class="flow-step" data-step="3">candidate 和标准答案算 exact / similarity / syntax。</div>
+            <div class="flow-step" data-step="4">output 原文算 tag_format / no_extra_prose。</div>
+          </div>
+
+          <div class="callout">最终理解：<strong>exact 管正确性，similarity 给平滑信号，tag_format 管机器可解析边界，no_extra_prose 管别说废话，syntax 管最基本的语法合法性。</strong> 但当前 reward 还不是完整代码执行验证器，不能替代单测和真实运行。</div>
+          <div class="refs">参考代码：<code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/patching.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/ast_tools.py</code>。</div>
         </section>
 
 
