@@ -967,6 +967,15 @@
             <a href="#open-deep-research-vs-hermes-gaia">02 · 为什么 Deep Research Agent 在 GAIA 上更容易打过 Hermes 这类通用 Agent</a>
           </div>
         </details>
+        <details class="toc-group" id="vragTocGroup" open>
+          <summary>
+            <span class="toc-group-title">Alibaba VRAG</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#vrag-project-overview">01 · 项目概览</a>
+          </div>
+        </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
           <summary>
             <span class="toc-group-title">算法查漏补缺</span>
@@ -5944,6 +5953,68 @@ print(answer)</code></pre>
           <div class="refs">Open Deep Research 参考：<code class="inline">/root/open_deep_research/examples/open_deep_research/README.md</code>、<code class="inline">run.py</code>、<code class="inline">run_gaia.py</code>、<code class="inline">scripts/run_agents.py</code>、<code class="inline">scripts/text_web_browser.py</code>、<code class="inline">scripts/text_inspector_tool.py</code>、<code class="inline">scripts/reformulator.py</code>、<code class="inline">scripts/visual_qa.py</code>。Hermes 参考：<code class="inline">/root/hermes/README.md</code>、<code class="inline">environments/web_research_env.py</code>、<code class="inline">environments/agent_loop.py</code>、<code class="inline">environments/hermes_base_env.py</code>、<code class="inline">environments/tool_context.py</code>、<code class="inline">tools/web_tools.py</code>、<code class="inline">tools/tool_result_storage.py</code>。</div>
         </section>
 
+
+        <section class="section reveal" id="vrag-project-overview">
+          <div class="section-header"><div class="index">VRAG1</div><h2>Alibaba VRAG 项目概览</h2></div>
+          <p><strong>VRAG</strong> 是 Alibaba-NLP 开源的视觉/多模态 RAG 项目，源码已 clone 到服务器：<code class="inline">/root/VRAG</code>。它不是传统“文本 chunk + 文本 embedding + LLM 回答”的 RAG，而是面向<strong>图片、PDF 页面、视频帧、视觉文档</strong>的多模态检索增强推理框架。</p>
+          <div class="callout"><strong>一句话：</strong>VRAG 要解决的是“答案藏在视觉材料里”的问题：先用视觉 embedding + FAISS 建多模态索引，再让 VLM 通过 <code class="inline">search</code>、<code class="inline">bbox crop/zoom</code>、多轮思考逐步获取证据；进一步的 VRAG-RL 用 GRPO/verl 训练模型学会这种多轮视觉检索与裁剪策略。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 项目包含三条主线</h3>
+              <p><code class="inline">README.md</code> 里同时介绍了 <strong>VimRAG</strong>、<strong>VRAG</strong> 和 <strong>VRAG-RL</strong>。VimRAG 是更新的多模态 memory graph / DAG 推理框架；VRAG 是纯视觉 RAG agent；VRAG-RL 是训练 VLM 学会多轮视觉检索、裁剪和回答的强化学习框架。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 检索层：视觉 embedding + FAISS</h3>
+              <p><code class="inline">search_engine/search_engine.py</code> 负责建库和搜索。它支持 <code class="inline">Alibaba-NLP/GVE-3B</code>、<code class="inline">GVE-7B</code>、<code class="inline">Qwen3-VL-Embedding-2B/8B</code>，也能接 <code class="inline">bge-m3</code> 做文本向量。</p>
+              <p>索引用 <code class="inline">faiss.IndexFlatIP</code>，文档、图片、视频会被编码成向量，元数据写入 <code class="inline">*_file_data_list.jsonl</code>，索引写入 <code class="inline">*_faiss_index.bin</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 服务层：FastAPI search engine</h3>
+              <p><code class="inline">search_engine/search_engine_api.py</code> 启动 <code class="inline">/search</code> 接口。请求传 <code class="inline">queries</code> 和 <code class="inline">top_k</code>，服务调用 <code class="inline">engine.search()</code> 返回候选视觉/文本材料。</p>
+              <p>如果传 <code class="inline">vrag_ret=true</code>，接口会把检索结果整理成 VRAG demo 需要的图片路径列表，方便 agent 把图片送回 VLM。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Demo 层：VRAG Agent</h3>
+              <p><code class="inline">demo/vrag_agent.py</code> 是经典 VRAG demo。它调用 OpenAI-compatible VLM 服务，提示模型必须先输出 <code class="inline">&lt;think&gt;</code>，然后在 <code class="inline">&lt;search&gt;</code>、<code class="inline">&lt;bbox&gt;</code>、<code class="inline">&lt;answer&gt;</code> 三种动作里选择。</p>
+              <p>当模型输出 <code class="inline">&lt;search&gt; query &lt;/search&gt;</code>，代码会调用 search API 拿图片；当输出 <code class="inline">&lt;bbox&gt;[x1,y1,x2,y2]&lt;/bbox&gt;</code>，代码会把上一张图按坐标裁剪并再次喂给模型，实现视觉 zoom-in。</p>
+            </article>
+          </div>
+
+          <p>从源码看，VRAG 的运行链路可以按下面理解：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>准备语料。</strong>图片直接放进 <code class="inline">search_engine/corpus/image/</code>；PDF 用 <code class="inline">search_engine/corpus/pdf2images.py</code> 转成页面图片；视频可用 <code class="inline">splitVideo.sh</code> 切片。</div>
+            <div class="flow-step" data-step="2"><strong>构建索引。</strong><code class="inline">SearchEngine.build_index()</code> 读取图片/文本/视频，调用 GVE 或 Qwen3-VL embedding 模型生成向量，写入 FAISS。</div>
+            <div class="flow-step" data-step="3"><strong>启动检索服务。</strong><code class="inline">search_engine_api.py</code> 加载 embedding 模型和索引目录，暴露 <code class="inline">POST /search</code>。</div>
+            <div class="flow-step" data-step="4"><strong>启动推理模型。</strong>VRAG demo 用本地 vLLM 部署 <code class="inline">Qwen2.5-VL-7B-VRAG</code> 或 <code class="inline">Qwen2.5-VL-7B-Instruct</code>，VimRAG demo 可走 DashScope 的 Qwen API。</div>
+            <div class="flow-step" data-step="5"><strong>Agent 多轮行动。</strong>模型先思考；缺信息时 search；看到图片后可以 bbox 裁剪；证据足够时 answer。</div>
+            <div class="flow-step" data-step="6"><strong>返回答案和轨迹。</strong>Streamlit demo 会展示搜索图片、裁剪区域、推理过程；VimRAG 还会展示 DAG / memory graph。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>VimRAG：DAG + 多模态记忆</h3>
+              <p><code class="inline">demo/vimrag_agent.py</code> 维护 <code class="inline">action_graph</code> 和 <code class="inline">multimodal_memory</code>。模型通过 <code class="inline">add_search_node</code> 增加搜索节点，通过 <code class="inline">summarize_and_memorize</code> 把检索结果压缩成高密度记忆，再用 <code class="inline">add_answer_node</code> 输出最终答案。</p>
+              <p><code class="inline">demo/vimrag_prompt.py</code> 明确规定每轮只能添加一个节点，search 节点必须有唯一 ID、parent_ids 和 query，搜索后必须总结和记忆。</p>
+            </article>
+            <article class="mini-card">
+              <h3>VRAG-RL：训练模型学会视觉检索动作</h3>
+              <p><code class="inline">VRAG-RL/vrag_agent/generation.py</code> 的主循环是 <code class="inline">run_llm_loop()</code>：Generation → Parse Action → Observation → Check Termination。它会解析模型输出的 <code class="inline">search</code>、<code class="inline">bbox</code>、<code class="inline">answer</code>，把检索结果或裁剪图像重新塞回上下文。</p>
+              <p><code class="inline">train_grpo_qwen2_5_vl_7b.sh</code> 使用 <code class="inline">verl.trainer.main_ppo</code>，配置 <code class="inline">algorithm.adv_estimator=grpo</code>，并通过 reward model 给轨迹打分。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它和普通 RAG 的差异</h3>
+              <p>普通 RAG 多数是“文本切块 → 文本召回 → 文本生成”。VRAG 是“视觉材料 → 视觉 embedding 召回 → VLM 看图推理 → 必要时裁剪局部区域”。关键能力不只是找文档，而是让模型在视觉证据上多轮定位细节。</p>
+            </article>
+            <article class="mini-card">
+              <h3>工程依赖和运行成本</h3>
+              <p>VRAG demo 本地模型路径需要较强 GPU，README 里提到 7B VRAG 模型通常用 A100 80G 级别部署；VimRAG demo 推荐 DashScope API，启动成本低。检索层还需要 embedding 模型、FAISS 索引和 FastAPI search server。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>VRAG = 面向视觉文档/图片/视频的 Agentic RAG。</strong>它把检索对象从文本 chunk 扩展到视觉内容，把 agent 动作从“查文本”扩展到“查图、看图、裁剪局部、继续看”，再用 VRAG-RL 训练模型把这些动作学成稳定策略。</div>
+          <div class="refs">本地源码：<code class="inline">/root/VRAG</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">VimRAG/README.md</code>、<code class="inline">VRAG-RL/README.md</code>、<code class="inline">demo/vrag_agent.py</code>、<code class="inline">demo/vimrag_agent.py</code>、<code class="inline">demo/vimrag_prompt.py</code>、<code class="inline">search_engine/search_engine.py</code>、<code class="inline">search_engine/search_engine_api.py</code>、<code class="inline">VRAG-RL/vrag_agent/generation.py</code>、<code class="inline">VRAG-RL/train_grpo_qwen2_5_vl_7b.sh</code>。</div>
+        </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
           <div class="section-header"><div class="index">ALG1</div><h2>embedding 模型和 reranker 模型原理是什么</h2></div>
