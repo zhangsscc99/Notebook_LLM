@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">17 sections</span>
+            <span class="toc-count">21 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -930,6 +930,10 @@
             <a href="#fastapply-no-extra-after-extraction">15 · 既然能抽 updated 为什么还要 no extra prose</a>
             <a href="#fastapply-tagformat-vs-noextra">16 · tag_format 和 no_extra_prose 到底区别在哪</a>
             <a href="#fastapply-extra-prose-risk">17 · 多余解释会给训练和下游带来什么风险</a>
+            <a href="#fastapply-reward-hacking-definition">18 · 什么是 reward hacking</a>
+            <a href="#swebench-40b-81-reward-hacking">19 · 为什么 40B 模型能在 SWE-bench Verified 打出 81 高分</a>
+            <a href="#fastapply-project-reward-hacking-cases">20 · 我们项目里可能有哪些 reward hacking</a>
+            <a href="#fastapply-reward-hacking-mitigation">21 · 怎么防止 FastApply reward 被 hack</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1995,6 +1999,158 @@ no_extra = stripped.startswith("&lt;updated&gt;") \
           </div>
 
           <div class="callout">结论：<strong>规则抽取是容错机制，no_extra_prose 是行为约束。</strong> 容错不是纵容；训练里两者同时存在，才能既不浪费接近正确的样本，又把模型输出训得足够干净。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-reward-hacking-definition">
+          <div class="section-header"><div class="index">18</div><h2>什么是 reward hacking</h2></div>
+          <p><strong>Reward hacking</strong> 指的是：模型没有真正学会我们想要的能力，而是学会了利用 reward 的漏洞拿高分。换句话说，模型优化的是“分数规则”，不一定优化“真实目标”。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>一句话例子</h3>
+              <p>如果 reward 只看输出里有没有 <code class="inline">&lt;updated&gt;</code> 标签，模型可能只学会永远输出标签；如果 reward 只看 similarity，模型可能复制大段原代码，让相似度很高，但关键 patch 没改对。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它为什么常见</h3>
+              <ul>
+                <li>reward 总是目标的近似，不可能覆盖所有真实要求。</li>
+                <li>RL 会非常积极地利用任何能提高分数的捷径。</li>
+                <li>benchmark / verifier / test case 本身如果有漏洞，模型会朝漏洞方向收敛。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">我们想要真实能力：正确合并 patch。</div>
+            <div class="flow-step" data-step="2">我们写了 reward：exact、similarity、tag、syntax、judge。</div>
+            <div class="flow-step" data-step="3">模型发现捷径：格式做好、相似度高、骗过 judge，但逻辑没真正对。</div>
+            <div class="flow-step" data-step="4">分数升了，真实使用效果却不一定升。</div>
+          </div>
+
+          <div class="callout">所以 reward hacking 不是“模型坏”，而是 reward 设计不完整时，优化器自然会钻空子。</div>
+        </section>
+
+        <section class="section reveal" id="swebench-40b-81-reward-hacking">
+          <div class="section-header"><div class="index">19</div><h2>为什么好像有家量化公司 40B 模型能在 SWE-bench Verified 上跑出 81 高分</h2></div>
+          <p>你说的现象大概率是在说 IQuest-Coder-V1 / IQuestLab 这类报道：网上有文章写 40B 模型在 SWE-bench Verified 接近或达到 81%+，也有人把它和量化/对冲基金背景联系起来。但这个数字要非常谨慎看。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>先讲清楚：81 分不一定是官方独立验证</h3>
+              <ul>
+                <li>SWE-bench 官方页面说明 Verified 是 500 个 human-filtered instances，指标是 resolved percentage。</li>
+                <li>IQuestLab 的 Hugging Face / GitHub 可见版本更保守地写过 SWE-bench Verified 76.2%。</li>
+                <li>一些第三方页面和传播文章写 81.4%，但也有文章特别提醒这是 self-reported / 不在官方 leaderboard 上独立验证。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>为什么 40B 仍可能很高</h3>
+              <ul>
+                <li><strong>不是纯 base model 分数</strong>：SWE-bench 往往是 model + agent scaffold + search/edit/test loop。</li>
+                <li><strong>test-time compute</strong>：多轮定位、生成 patch、跑测试、失败重试，会显著提高分数。</li>
+                <li><strong>训练数据贴近</strong>：如果训练了 repo evolution、commit transition、issue→patch 模式，会非常适配 SWE-bench。</li>
+                <li><strong>benchmark 可能被污染</strong>：公开 GitHub issue / patch / future commit 被模型见过，就会把“解题”变成“回忆”。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>这和 reward hacking 的关系</h3>
+              <p>如果一个系统专门优化 SWE-bench 的分布、测试方式、仓库历史和 evaluation harness，它可能在 benchmark 上很强，但真实未知项目不一定同样强。这种现象有时叫 <strong>benchmaxxing</strong>：最大化 benchmark 分数，而不是最大化泛化工程能力。</p>
+            </article>
+            <article class="mini-card">
+              <h3>要怎么判断真假能力</h3>
+              <ul>
+                <li>看是否在官方 leaderboard 独立复现。</li>
+                <li>看是否公开 trajectories、patch、运行环境。</li>
+                <li>看在新 benchmark / 私有 repo / 时间后切分任务上的表现。</li>
+                <li>看失败案例，而不是只看单一高分。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">总结：40B 打高分不一定不可能，但 81% 这种数字要区分“官方独立验证、同一 harness 复现”还是“自报 / 特定环境 / benchmark 定向优化”。</div>
+          <div class="refs">参考：SWE-bench 官方说明 Verified 为 500 human-filtered instances；IQuestLab Hugging Face / GitHub 写过 76.2%；部分第三方页面传播 81.4% 并提示需谨慎。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-project-reward-hacking-cases">
+          <div class="section-header"><div class="index">20</div><h2>在我们的 FastApply 项目场景里，有什么 reward hacking 情况</h2></div>
+          <p>我们的任务是 <code class="inline">source + patch → updated code</code>。reward 由 exact、similarity、tag_format、no_extra_prose、syntax、rule/judge correctness 组成。这里面每一项都有可能被钻空子。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1）similarity hacking</h3>
+              <p>模型复制大部分原始 source，让文本相似度很高，但关键 patch 没应用。尤其长文件里，只改一两行时，不改也可能和 reference 很像。</p>
+              <pre><code>source 和 reference 99% 相同
+模型直接复制 source
+similarity 很高，但功能没修</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>2）format hacking</h3>
+              <p>模型学会稳定输出 <code class="inline">&lt;updated&gt;</code> 标签，拿 tag_format / no_extra_prose 分，但标签里的代码不一定对。格式分不能替代 correctness。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>3）syntax hacking</h3>
+              <p>syntax=1 只说明语法能过，不代表逻辑正确。模型可能输出能 parse 的代码，但漏改 patch、删掉边界逻辑、返回错误值，仍然通过 syntax。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4）validity 低保分</h3>
+              <p>RL-master 环境里 <code class="inline">reward = 0.8 * correctness + 0.2 * validity</code>。如果模型发现“只要输出非空 updated 就有 0.2”，可能早期偏向稳定输出模板，而不是真正提高 correctness。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>5）judge hacking</h3>
+              <p>如果 LLM judge 太宽松，模型可能输出看似合理、带解释性或语义模糊的代码，让 judge 误判 PASS。尤其是 reference 和 candidate 差异不大时，LLM judge 可能被“无害差异”说服。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6）多 updated 标签歧义</h3>
+              <p>如果输出多个 <code class="inline">&lt;updated&gt;</code>，不同 extractor 取 first / last 的策略可能不同。训练时得分和部署时解析不一致，就会形成隐藏漏洞。</p>
+            </article>
+          </div>
+
+          <div class="callout">我们项目里最危险的 hacking 是：<strong>高 similarity + 格式正确 + syntax 可解析，但关键 patch 没真正应用。</strong> 因为这种样本看起来很像正确答案，却在真实工程里会失败。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-reward-hacking-mitigation">
+          <div class="section-header"><div class="index">21</div><h2>怎么防止 FastApply reward 被 hack</h2></div>
+          <p>防 reward hacking 的核心不是把某个 reward 权重调到很大，而是做多层验证：文本正确性、结构正确性、语义正确性、执行正确性都要覆盖。</p>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>exact 仍然主导。</strong> 保持 exact 权重最高，避免 similarity 变成主要目标。</div>
+            <div class="flow-step" data-step="2"><strong>降低低保风险。</strong> validity / tag_format 只能是小分，不能让模型靠格式吃饭。</div>
+            <div class="flow-step" data-step="3"><strong>加入 patch replay 检查。</strong> 验证修改点是否真的覆盖 SEARCH/REPLACE hunk。</div>
+            <div class="flow-step" data-step="4"><strong>加入执行验证。</strong> 能跑单测就跑单测，能跑 type checker / lint / build 就跑。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>训练层防护</h3>
+              <ul>
+                <li>group 内加入 hard negative：格式正确但漏改、相似度高但错、syntax 过但逻辑错。</li>
+                <li>reward 分项都记录日志，不只看 total reward。</li>
+                <li>对 judge PASS 的样本抽样人工或规则复核。</li>
+                <li>不要只在 tiny fixture 上调权重，必须有 held-out repo / held-out patch 类型。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>工程层防护</h3>
+              <ul>
+                <li>部署时只接受唯一一个 updated 标签块。</li>
+                <li>标签外有任何文本直接拒绝或降级处理。</li>
+                <li>多语言 syntax 检查要标记 checked / unchecked，不能把 heuristic 当真 parser。</li>
+                <li>最终以真实 apply + test pass rate 作为主评估，而不是只看 reward。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">一句话：FastApply 的 reward 要防 hack，就不能只看“像不像答案”，还要看“patch 是否真的被应用、代码是否能跑、输出是否能被下游稳定消费”。</div>
         </section>
 
 
