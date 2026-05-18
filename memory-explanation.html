@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">8 sections</span>
+            <span class="toc-count">10 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -921,6 +921,8 @@
             <a href="#fastapply-lora-rank-impact">06 · LoRA rank 过小或过大的影响</a>
             <a href="#fastapply-resource-requirements">07 · 显存资源与卡配置</a>
             <a href="#rl-master-72-image-grpo-migration">08 · 72 张图 RL-master FastApply GRPO 迁移报告</a>
+            <a href="#fastapply-project-reward-design">09 · 项目里的 reward 是怎么做的</a>
+            <a href="#fastapply-project-loss-definition">10 · 项目里的损失函数咋定义的</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1499,6 +1501,129 @@ loss ≈ - Σ weights_t · adv_i · ratio_t</code></pre>
 
           <div class="callout">结论：72 张图里的 RL-master FastApply pipeline 已迁移成可运行代码；当前只用 tiny test 数据确保链路能跑，不虚构大数据。训练项目已提交推送到 <code class="inline">zhangsscc99/RLHF_GRPO</code>，commit 为 <code class="inline">230f28d</code>。</div>
           <div class="refs">报告文件：<code class="inline">/root/rlhf/reports/rl_master_72_image_reproduction_report.md</code>、<code class="inline">/root/rlhf/reports/rl_master_72_image_mapping.json</code>、<code class="inline">/root/rlhf/reports/rl_master_fastapply_grpo_smoke.json</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-project-reward-design">
+          <div class="section-header"><div class="index">09</div><h2>详解：项目里的 reward 是怎么做的</h2></div>
+          <p>这个项目里 reward 分两层：<strong>训练用 verifier reward</strong> 和 <strong>RL-master 环境 reward</strong>。两者目标一致：不奖励聊天能力，只奖励模型能否严格把 patch 合并成正确代码，并且输出格式干净。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1）FastApply 训练 reward</h3>
+              <p>位置：<code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>。</p>
+              <pre><code>total = 0.55 * exact
+      + 0.20 * similarity
+      + 0.10 * tag_format
+      + 0.05 * no_extra_prose
+      + 0.10 * syntax</code></pre>
+              <ul>
+                <li><strong>exact</strong>：抽取 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code> 后，和 gold updated source 归一化比较，完全一致给 1。</li>
+                <li><strong>similarity</strong>：用 <code class="inline">difflib.SequenceMatcher</code> 算相似度，避免只有 0/1 导致信号太稀疏。</li>
+                <li><strong>tag_format</strong>：必须能抽到 <code class="inline">&lt;updated&gt;</code> 标签，格式对才给分。</li>
+                <li><strong>no_extra_prose</strong>：输出要从 <code class="inline">&lt;updated&gt;</code> 开始、以 <code class="inline">&lt;/updated&gt;</code> 结束，不能夹解释、Markdown fence、废话。</li>
+                <li><strong>syntax</strong>：对 Python 用 AST parse；JS/TS 用轻量 regex 分析，保证代码结构基本可用。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>2）RL-master 环境 reward</h3>
+              <p>位置：<code class="inline">/root/rlhf/rl_master/agent/environment/packages/fastapply/impl.py</code>。</p>
+              <pre><code>correctness = compare(reference, candidate)
+is_valid = bool(candidate)
+reward = correctness * 0.8 + is_valid * 0.2</code></pre>
+              <p>这里更接近图片里的环境式 reward：正确性占 80%，输出是否有效占 20%。也就是说，完全正确且格式有效得 1.0；有输出但不正确通常只有 0.2；空输出是 0。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先抽取。</strong>用 <code class="inline">extract_updated_tag</code> / <code class="inline">extract_tagged_content</code> 只取 <code class="inline">updated</code> 标签内的代码。</div>
+            <div class="flow-step" data-step="2"><strong>再比较。</strong>训练 reward 做 exact + similarity；RL-master rule reward 用 <code class="inline">difflib</code> 忽略空白行后比较增删行。</div>
+            <div class="flow-step" data-step="3"><strong>再验格式。</strong>检查是否有标签、是否只有标签包裹的代码、是否没有多余解释。</div>
+            <div class="flow-step" data-step="4"><strong>最后做 judge fallback。</strong><code class="inline">rl_master/applications/fastapply/reward/score.py</code> 里 rule compare 失败时，会构造 diff view 并用 <code class="inline">judge.yaml</code> 让 LLM 判等价。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么 exact 权重大</h3>
+              <p>FastApply 是代码应用任务，不是开放问答。真正需要的是“补丁是否完整合并、代码是否和目标一致”。所以 exact 权重最高；similarity 只是为了 tiny / early stage 训练时提供平滑信号。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么要格式分</h3>
+              <p>代码 agent 最怕模型输出解释、代码块围栏、冲突标记或半截代码。格式 reward 会把模型推向“只输出可被机器消费的 updated code”，这对后续自动 apply 很关键。</p>
+            </article>
+          </div>
+
+          <div class="callout">一句话：项目 reward 的核心是 <strong>正确合并 patch</strong>，其次是 <strong>输出可解析、无废话、语法合法</strong>。它不是偏好模型“说得好”，而是奖励模型“改得准”。</div>
+          <div class="refs">参考代码：<code class="inline">fastapply_pipeline/rewards.py</code>、<code class="inline">rl_master/applications/fastapply/reward/score.py</code>、<code class="inline">rl_master/applications/fastapply/reward/utils.py</code>、<code class="inline">rl_master/agent/environment/packages/fastapply/impl.py</code>。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-project-loss-definition">
+          <div class="section-header"><div class="index">10</div><h2>详解：项目里的损失函数咋定义的</h2></div>
+          <p>项目里的正式训练不是 SFT cross entropy，而是 GRPO / importance sampling 风格损失。最重要的文件是 <code class="inline">/root/rlhf/fastapply_pipeline/grpo.py</code> 和 <code class="inline">/root/rlhf/fastapply_pipeline/train_mint_fastapply_grpo.py</code>。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1）先把 reward 变成 advantage</h3>
+              <pre><code>rewards = [score(output_i) for output_i in group]
+mean_reward = sum(rewards) / len(rewards)
+advantage_i = reward_i - mean_reward</code></pre>
+              <p>GRPO 不需要单独训练 value model。它直接在同一个 prompt 的一组候选里比较：谁比组平均好，advantage 为正；谁比组平均差，advantage 为负。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2）Datum 里怎么喂给 MinT</h3>
+              <pre><code>loss_fn_inputs = {
+  "target_tokens": full[1:],
+  "weights": [0]*prompt + [1]*response,
+  "logprobs": old_policy_logprobs,
+  "advantages": centered_advantages,
+}</code></pre>
+              <ul>
+                <li><code class="inline">target_tokens</code>：每个位置预测下一个 token。</li>
+                <li><code class="inline">weights</code>：prompt 部分是 0，只训练 response token。</li>
+                <li><code class="inline">logprobs</code>：采样时旧策略 <code class="inline">π_old</code> 的 logprob。</li>
+                <li><code class="inline">advantages</code>：该 response 的组内优势，复制到生成 token 上。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">当前 LoRA sampler 对同一 prompt 采样多条 response。</div>
+            <div class="flow-step" data-step="2">reward 函数给每条 response 打分。</div>
+            <div class="flow-step" data-step="3">组内中心化得到 advantage。</div>
+            <div class="flow-step" data-step="4">调用 <code class="inline">training_client.forward_backward(datums, loss_fn=&quot;importance_sampling&quot;)</code>。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>直观数学式</h3>
+              <pre><code>ratio_t = exp(logπ_new(a_t|s_t) - logπ_old(a_t|s_t))
+loss_policy = - Σ weights_t · advantage_i · ratio_t</code></pre>
+              <p>如果 advantage 为正，最小化 loss 会提高这条输出的概率；如果 advantage 为负，最小化 loss 会降低这条输出的概率。</p>
+            </article>
+            <article class="mini-card">
+              <h3>图片里那套 KL / entropy</h3>
+              <p>RL-master smoke 里显式写了更完整的分解：</p>
+              <pre><code>policy_loss = -min(ratio * adv, clipped_ratio * adv)
+kl_loss = beta_kl * KL(policy || ref)
+entropy_bonus = entropy_coef * entropy
+total_loss = policy_loss + kl_loss - entropy_bonus</code></pre>
+              <p>含义是：提高好样本概率，但别偏离 reference model 太远；同时保留一点熵，避免策略过早塌缩。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>和 SFT 的区别</h3>
+              <p>SFT 是“给定标准答案，逐 token 模仿”；这里是“同一 prompt 多个答案互相比，reward 高的提高概率、reward 低的降低概率”。所以它能优化 verifier 关心的最终行为，而不只是复制某条 gold response。</p>
+            </article>
+            <article class="mini-card">
+              <h3>tiny smoke 的特殊点</h3>
+              <p>为了 1–2 条 test 数据也能跑通，脚本可加入 oracle rollout 让 advantage 不退化。正式训练时应使用更大的 group size，例如图片配置里的 <code class="inline">n=8</code>。</p>
+            </article>
+          </div>
+
+          <div class="callout">一句话：损失函数的目标是 <strong>让高 reward 的 updated-code 轨迹更可能出现，让低 reward 轨迹更不可能出现，同时用 KL/entropy 控制训练不要跑飞</strong>。</div>
+          <div class="refs">参考代码：<code class="inline">fastapply_pipeline/grpo.py</code>、<code class="inline">fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">rl_master/scripts/run_fastapply_grpo_smoke.py</code>。</div>
         </section>
 
 
