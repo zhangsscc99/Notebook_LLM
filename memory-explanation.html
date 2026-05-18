@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">11 sections</span>
+            <span class="toc-count">14 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -924,6 +924,9 @@
             <a href="#fastapply-project-reward-design">09 · 项目里的 reward 是怎么做的</a>
             <a href="#fastapply-project-loss-definition">10 · 项目里的损失函数咋定义的</a>
             <a href="#fastapply-reward-fields-deep-dive">11 · reward 每个字段到底什么意思</a>
+            <a href="#fastapply-exact-only-reward">12 · reward 如果只拿 exact 会怎么样</a>
+            <a href="#fastapply-multilang-syntax-check">13 · syntax 怎么支持更多编程语言</a>
+            <a href="#fastapply-updated-tag-parser">14 · updated 标签是 LLM 解析还是规则解析</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1762,6 +1765,107 @@ no_extra = stripped.startswith("&lt;updated&gt;") \
 
           <div class="callout">最终理解：<strong>exact 管正确性，similarity 给平滑信号，tag_format 管机器可解析边界，no_extra_prose 管别说废话，syntax 管最基本的语法合法性。</strong> 但当前 reward 还不是完整代码执行验证器，不能替代单测和真实运行。</div>
           <div class="refs">参考代码：<code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/patching.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/ast_tools.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-exact-only-reward">
+          <div class="section-header"><div class="index">12</div><h2>如果 reward 只拿 exact 做奖励会怎么样</h2></div>
+          <p>如果只用 <code class="inline">exact</code>，reward 就会变成最硬的 0/1 判题：抽取出的 candidate 和 gold updated source 完全一致才给 1，否则给 0。这样很干净，但在 GRPO 里会有几个明显问题。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>最大问题：奖励太稀疏</h3>
+              <ul>
+                <li>早期模型大多数输出都不会完全一致，整个 group 可能全是 0。</li>
+                <li>如果同组 reward 全一样，<code class="inline">advantage = reward - mean</code> 接近 0，GRPO 基本没有学习信号。</li>
+                <li>tiny 数据下尤其明显：模型差一点点也和完全错一样，训练会很不稳定。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>还会惩罚“语义等价”</h3>
+              <p>代码任务里，两个实现可能语义等价但文本不完全一样。只用 exact 会把这些都判 0，例如变量名不同、等价重排、无害空行/注释差异，都可能被过度惩罚。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">只用 exact：最准确，但最稀疏。</div>
+            <div class="flow-step" data-step="2">加 similarity：让“接近正确”的样本也有一点梯度方向。</div>
+            <div class="flow-step" data-step="3">加 tag/no_extra：让模型学会机器可解析输出格式。</div>
+            <div class="flow-step" data-step="4">加 syntax/judge：减少语法坏掉或语义等价被误杀的问题。</div>
+          </div>
+
+          <div class="callout">结论：只拿 exact 做 reward 可以作为最终严格指标，但不适合作为唯一训练 reward。训练期更适合 exact 为主、similarity / tag_format / no_extra_prose / syntax / judge 辅助，避免 GRPO 没信号或过度脆弱。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-multilang-syntax-check">
+          <div class="section-header"><div class="index">13</div><h2>syntax 那里能不能改写成支持更多常见编程语言</h2></div>
+          <p>可以，已经把项目里的 <code class="inline">fastapply_pipeline/ast_tools.py</code> 改成多语言可插拔检查，不再只写死 Python 和 JS。现在逻辑是：有本地语法工具就用工具检查；没有工具就退回 heuristic，并在结果里标记 <code class="inline">checked=False</code>。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>现在支持的方向</h3>
+              <ul>
+                <li>Python：<code class="inline">ast.parse</code></li>
+                <li>JavaScript：<code class="inline">node --check</code></li>
+                <li>TypeScript：<code class="inline">tsc --noEmit</code></li>
+                <li>Java：<code class="inline">javac</code></li>
+                <li>Go：<code class="inline">gofmt -e</code></li>
+                <li>Rust：<code class="inline">rustc --crate-type=lib --emit=metadata</code></li>
+                <li>C/C++：<code class="inline">gcc/g++ -fsyntax-only</code></li>
+                <li>Shell/Ruby/PHP/Lua：对应 <code class="inline">bash -n</code>、<code class="inline">ruby -c</code>、<code class="inline">php -l</code>、<code class="inline">luac -p</code></li>
+                <li>JSON/YAML：标准解析器 / PyYAML</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>注意：这仍不是运行测试</h3>
+              <p>syntax 检查只回答“语法/解析层面是否过得去”。它不能保证代码运行不报错，也不能保证业务逻辑正确。比如变量未定义、数据库连接失败、单测失败、类型不匹配，都可能不是纯 syntax 能解决的。</p>
+            </article>
+          </div>
+
+          <pre><code>ScopeInfo(
+  language="typescript",
+  parse_ok=True,
+  checker="tsc",
+  checked=True,
+)</code></pre>
+
+          <div class="callout">结论：syntax 已改成多语言可插拔，但真正严肃的代码 reward 应该继续叠加 unit tests、type checker、lint、沙箱执行和 LLM judge。</div>
+          <div class="refs">代码位置：<code class="inline">/root/rlhf/fastapply_pipeline/ast_tools.py</code>；测试已覆盖 Python、JSON 和 TypeScript fallback。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-updated-tag-parser">
+          <div class="section-header"><div class="index">14</div><h2>updated 标签是由 LLM 解析出来，还是规则解析出来</h2></div>
+          <p><strong>updated 标签是模型生成的，但解析是规则解析，不是 LLM 解析。</strong> 也就是说，LLM 负责按 prompt 输出 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code>；项目代码用正则/规则把标签里的内容抽出来。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>规则解析位置</h3>
+              <ul>
+                <li><code class="inline">fastapply_pipeline/patching.py</code>：<code class="inline">extract_updated_tag</code></li>
+                <li><code class="inline">rl_master/agent/evaluation/extractors.py</code>：<code class="inline">extract_tagged_content</code></li>
+              </ul>
+              <pre><code>m = re.search(r"&lt;updated&gt;...&lt;/updated&gt;", output)
+candidate = m.group(1) if m else None</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>LLM 在哪里参与</h3>
+              <p>LLM 参与的是“生成”和“judge fallback”：</p>
+              <ul>
+                <li>生成阶段：LLM 根据 source + patch 输出 updated 标签包裹的代码。</li>
+                <li>reward 阶段：先规则抽取，再 exact/similarity/syntax。</li>
+                <li>judge 阶段：rule exact 失败时，才可能用 LLM 判断 candidate 和 reference 是否语义等价。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">LLM 输出原文。</div>
+            <div class="flow-step" data-step="2">正则抽取 <code class="inline">updated</code> 标签。</div>
+            <div class="flow-step" data-step="3">抽取成功：candidate = 标签内部代码。</div>
+            <div class="flow-step" data-step="4">抽取失败：tag_format=0，reward 会扣分，必要时走 fallback。</div>
+          </div>
+
+          <div class="callout">结论：不要把 updated 当成“LLM 自己解析”。它是 <strong>LLM 按协议生成 + 程序规则抽取</strong>。这样更稳定、可控、便宜，也避免每次抽标签还要再调用一个 LLM。</div>
         </section>
 
 
