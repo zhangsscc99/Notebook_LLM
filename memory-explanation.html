@@ -974,10 +974,12 @@
         <details class="toc-group" id="vragTocGroup" open>
           <summary>
             <span class="toc-group-title">Alibaba VRAG</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#vrag-project-overview">01 · 项目概览</a>
+            <a href="#vrag-text-rag-chunking-methods">02 · 文本 RAG 的切块一般有几种方法</a>
+            <a href="#vrag-visual-rag-chunking-cropping">03 · 视觉 RAG 的切块怎么切，检索的时候怎么裁剪</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6170,6 +6172,153 @@ print(answer)</code></pre>
 
           <div class="callout">最短总结：<strong>VRAG = 面向视觉文档/图片/视频的 Agentic RAG。</strong>它把检索对象从文本 chunk 扩展到视觉内容，把 agent 动作从“查文本”扩展到“查图、看图、裁剪局部、继续看”，再用 VRAG-RL 训练模型把这些动作学成稳定策略。</div>
           <div class="refs">本地源码：<code class="inline">/root/VRAG</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">VimRAG/README.md</code>、<code class="inline">VRAG-RL/README.md</code>、<code class="inline">demo/vrag_agent.py</code>、<code class="inline">demo/vimrag_agent.py</code>、<code class="inline">demo/vimrag_prompt.py</code>、<code class="inline">search_engine/search_engine.py</code>、<code class="inline">search_engine/search_engine_api.py</code>、<code class="inline">VRAG-RL/vrag_agent/generation.py</code>、<code class="inline">VRAG-RL/train_grpo_qwen2_5_vl_7b.sh</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="vrag-text-rag-chunking-methods">
+          <div class="section-header"><div class="index">VRAG2</div><h2>文本 RAG 的切块一般有几种方法</h2></div>
+          <p>文本 RAG 的“切块”不是随便把文章切短。它的核心目标是：<strong>让每个 chunk 足够小，能被 embedding / reranker / LLM 处理；又足够完整，保留回答问题所需的语义单元。</strong>切太小会丢上下文，切太大会召回不准、上下文浪费。</p>
+          <div class="callout"><strong>一句话：</strong>文本切块的本质是在“语义完整性”和“检索粒度”之间折中。常见方法可以分成：固定长度、重叠滑窗、结构化切分、语义切分、递归切分、问答/命题化切分、层级切分。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 固定长度切块</h3>
+              <p>按字符数或 token 数硬切，比如每 500 tokens 一块。这种方法最简单、稳定、容易控制长度。</p>
+              <p>缺点是可能从句子中间、表格中间、代码中间切断，导致 chunk 语义不完整。适合脏数据初版、海量网页、低成本 baseline。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 滑动窗口 + overlap</h3>
+              <p>固定长度基础上加重叠区域，比如 chunk size 800 tokens，overlap 100 tokens。这样前后文不会完全断裂。</p>
+              <p>优点是召回更稳；缺点是索引膨胀、重复内容多、reranker 和 LLM 容易看到重复证据。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 按结构切块</h3>
+              <p>按 Markdown 标题、HTML 节点、PDF 章节、段落、表格、代码块、列表项切分。它优先保留作者写作结构。</p>
+              <p>这是工程里非常常用的方法，因为标题、章节、段落天然就是语义边界。缺点是不同文档格式质量不一，PDF 解析尤其容易乱。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 递归切分</h3>
+              <p>先按大边界切，比如章节；太长再按段落；还太长再按句子；最后才按 token 硬切。</p>
+              <p>它比单纯固定长度更稳：尽量保留结构，只有超长时才退化到更细粒度。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>5. 语义切分</h3>
+              <p>用 embedding 或模型判断相邻句子的语义相似度，在话题变化处切开。比如一段从“产品功能”转到“价格政策”，相似度下降，就作为切点。</p>
+              <p>优点是更接近人类阅读边界；缺点是成本更高，而且对 embedding 模型质量敏感。</p>
+            </article>
+            <article class="mini-card">
+              <h3>6. 命题化 / atomic facts 切分</h3>
+              <p>把长段落改写成多个原子事实或 QA 对。例如“公司 A 在 2020 年收购 B”变成一个独立 proposition。</p>
+              <p>这种方法适合高精度知识库、法律/金融/医疗条款，但构建成本高，且需要额外模型做信息抽取。</p>
+            </article>
+            <article class="mini-card">
+              <h3>7. 父子 chunk / 层级切分</h3>
+              <p>小 chunk 用于检索，大 chunk 或父文档用于回答。比如用句子级 chunk 召回，再把它所在的整段或整节返回给 LLM。</p>
+              <p>它解决了“小块召回准但上下文少”的矛盾，是实际 RAG 系统里很常见的优化。</p>
+            </article>
+            <article class="mini-card">
+              <h3>8. 表格、代码、公式的专门切法</h3>
+              <p>表格最好按行/列语义、表头和单位一起保留；代码按函数/类切；公式要保留定义、变量解释和上下文。</p>
+              <p>这些内容不能简单按 token 切，否则 embedding 能召回但 LLM 看不懂。</p>
+            </article>
+          </div>
+
+          <pre><code>常见选择：
+- 通用文档：递归切分 + overlap
+- Markdown/HTML：按标题层级切，超长再递归
+- 高精度知识库：结构切分 + proposition/QA 化
+- 长报告/PDF：页/段/标题混合切分，保留页码和章节 metadata
+- 代码库：按函数、类、文件符号切分
+- 表格：按表格对象或带表头的行组切分</code></pre>
+
+          <div class="callout">最短总结：<strong>文本 RAG 切块不是一个固定答案。</strong>粗略 baseline 用固定长度 + overlap；更好的系统会利用文档结构；再高级会做语义切分、父子 chunk、命题化和领域专门切分。</div>
+        </section>
+
+        <section class="section reveal" id="vrag-visual-rag-chunking-cropping">
+          <div class="section-header"><div class="index">VRAG3</div><h2>视觉 RAG 的切块怎么切，检索的时候怎么裁剪</h2></div>
+          <p>视觉 RAG 的切块不能直接照搬文本 RAG。文本切的是 token/句子/段落；视觉 RAG 切的是<strong>页面、图片、视频片段、帧、局部区域</strong>。在 Alibaba VRAG 这个仓库里，默认工程做法比较清晰：<strong>索引阶段先按“视觉文件/页面/视频片段”作为召回单元；推理阶段再由模型输出 bbox，对召回图像做动态裁剪。</strong></p>
+          <div class="callout"><strong>一句话：</strong>视觉 RAG 一般先做粗粒度视觉 chunk 用来检索，比如 PDF 每页一张图、视频每 60 秒一段、图片一张一个节点；检索回来后，如果细节太小，再让 VLM 预测 bbox 坐标，裁剪局部区域重新喂给模型看。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. PDF 怎么切</h3>
+              <p>VRAG 的 <code class="inline">search_engine/corpus/pdf2images.py</code> 做法很直接：把 PDF 每一页转成一张 JPEG，保存到 <code class="inline">search_engine/corpus/image/</code>。</p>
+              <p>也就是说，PDF 的第一层视觉 chunk 是“页”。这比提取文本更保真，因为图表、版式、截图、扫描件、公式、PPT 风格页面都还在图片里。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 图片怎么切</h3>
+              <p>源码里 <code class="inline">SearchEngine.build_index()</code> 遍历输入目录，遇到 <code class="inline">.jpg</code>、<code class="inline">.png</code>、<code class="inline">.jpeg</code> 就作为一条 <code class="inline">type='image'</code> 的索引记录。</p>
+              <p>所以默认图片不是预先切成很多 patch，而是整图先入库。局部切割放到检索后的 agent 推理阶段处理。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 视频怎么切</h3>
+              <p><code class="inline">search_engine/corpus/splitVideo.sh</code> 用 ffmpeg/ffprobe 把长视频切成固定时长 chunk，默认 <code class="inline">CHUNK_DURATION=60</code> 秒。</p>
+              <p>构建索引时，视频条目会带 <code class="inline">fps=1.0</code>、<code class="inline">max_frames=8</code>、<code class="inline">min_frames=32</code>、<code class="inline">max_pixels=200*28*28</code> 等参数，让 embedding 模型以抽帧方式表达这个视频片段。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 检索单元是什么</h3>
+              <p>检索时，query 先被编码成视觉/文本查询向量。FAISS 在索引里找 topK，返回的是页面图、整图、视频片段或文本记录，而不是直接返回某个小 bbox。</p>
+              <p><code class="inline">search_engine/search_engine.py</code> 的 <code class="inline">search()</code> 对 GVE / Qwen3-VL embedding 都是先算 query vector，再 <code class="inline">_index.search(..., top_k)</code>。</p>
+            </article>
+          </div>
+
+          <p>VRAG 的裁剪发生在 agent 运行阶段，而不是 FAISS 检索阶段：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">模型输出 <code class="inline">&lt;search&gt; query &lt;/search&gt;</code>，<code class="inline">demo/vrag_agent.py</code> 调 <code class="inline">POST /search</code> 拿 top3 图片路径。</div>
+            <div class="flow-step" data-step="2">代码打开返回的图片，把原图保存到 <code class="inline">self.image_raw</code>，再通过 <code class="inline">process_image()</code> 缩放成 VLM 输入图，保存到 <code class="inline">self.image_input</code>。</div>
+            <div class="flow-step" data-step="3">VLM 看过图后，如果觉得局部太小或需要更清楚，会输出 <code class="inline">&lt;bbox&gt;[x1, y1, x2, y2]&lt;/bbox&gt;</code>。</div>
+            <div class="flow-step" data-step="4">代码读取当前输入图尺寸 <code class="inline">input_w/input_h</code> 和原图尺寸 <code class="inline">raw_w/raw_h</code>，把模型给出的输入图坐标映射回原图坐标。</div>
+            <div class="flow-step" data-step="5">裁剪前额外加 <code class="inline">pad_size = 56</code> 像素边距，防止 bbox 太紧丢掉上下文。</div>
+            <div class="flow-step" data-step="6">用 PIL 的 <code class="inline">crop()</code> 得到局部图，再重新 <code class="inline">process_image()</code> 成 base64 image_url，作为新的 user message 喂给 VLM。</div>
+          </div>
+
+          <pre><code># demo/vrag_agent.py 的核心裁剪逻辑
+bbox = json.loads(content)
+input_w, input_h = self.image_input[-1].size
+raw_w, raw_h = self.image_raw[-1].size
+
+# 输入图坐标 -> 原图坐标
+crop_region_bbox = (
+    bbox[0] * raw_w / input_w,
+    bbox[1] * raw_h / input_h,
+    bbox[2] * raw_w / input_w,
+    bbox[3] * raw_h / input_h,
+)
+
+# 加边距，裁剪，重新送给模型
+pad_size = 56
+crop_region_bbox = [
+    max(crop_region_bbox[0] - pad_size, 0),
+    max(crop_region_bbox[1] - pad_size, 0),
+    min(crop_region_bbox[2] + pad_size, raw_w),
+    min(crop_region_bbox[3] + pad_size, raw_h),
+]
+crop_region = self.image_raw[-1].crop(crop_region_bbox)</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么不一开始就切很多 patch</h3>
+              <p>预切很多 patch 会让索引量暴涨，而且 patch 脱离全局页面后容易失去语境。比如一个图表局部没有标题和坐标轴，模型可能看不懂。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么要动态裁剪</h3>
+              <p>动态裁剪让模型先看全局，再按需要 zoom-in。它符合人类看视觉文档的方式：先定位页面，再放大表格、数字、图例或小字。</p>
+            </article>
+            <article class="mini-card">
+              <h3>视觉 chunk 常见粒度</h3>
+              <p>PDF：页、版面区域、图表区域；图片：整图、检测框、OCR block；视频：固定时长片段、镜头切分、关键帧、时间戳片段。</p>
+            </article>
+            <article class="mini-card">
+              <h3>VRAG 当前源码的取舍</h3>
+              <p>这个仓库默认更偏“粗检索 + 动态裁剪”：先召回页面/整图/视频片段，再由 VLM 用 bbox 做局部放大。它没有在入库前把每张图切成 dense patches 后逐 patch 检索。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>视觉 RAG 的第一层 chunk 是可检索视觉单元，第二层 chunk 是推理时动态裁剪出来的局部视野。</strong>在 VRAG 里，PDF 先切成页图，视频先切成固定时长片段，图片整图入库；检索后模型用 bbox 指挥裁剪，实现 coarse-to-fine 的视觉证据获取。</div>
+          <div class="refs">参考源码：<code class="inline">/root/VRAG/search_engine/corpus/pdf2images.py</code>、<code class="inline">/root/VRAG/search_engine/corpus/splitVideo.sh</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py</code>、<code class="inline">/root/VRAG/search_engine/search_engine_api.py</code>、<code class="inline">/root/VRAG/demo/vrag_agent.py</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
