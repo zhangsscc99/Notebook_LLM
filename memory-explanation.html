@@ -910,12 +910,16 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">7 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
             <a href="#fastapply-qwen3-4b-pipeline-report">02 · FastApply GRPO 完整复刻报告</a>
             <a href="#fastapply-lora-grpo-details">03 · LoRA 插入位置与 GRPO 训练精髓</a>
+            <a href="#fastapply-grpo-loss-function">04 · 详解这个训练里的损失函数</a>
+            <a href="#fastapply-good-reward-bad-grpo">05 · reward 很好但 GRPO 效果不好怎么办</a>
+            <a href="#fastapply-lora-rank-impact">06 · LoRA rank 过小或过大的影响</a>
+            <a href="#fastapply-resource-requirements">07 · 显存资源与卡配置</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1292,6 +1296,151 @@ LoRA 后:    y = W x + scale · B(Ax)</code></pre>
 
           <div class="callout">训练精髓一句话：<strong>LoRA 决定“改哪些小参数”，GRPO 决定“哪些生成轨迹值得被提高概率”。</strong> 对 FastApply 来说，reward 不奖励会聊天，而奖励严格、可解析、无多余文本、能正确合并 patch 的代码输出。</div>
           <div class="refs">对应代码：<code class="inline">fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">fastapply_pipeline/grpo.py</code>、<code class="inline">fastapply_pipeline/rewards.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-grpo-loss-function">
+          <div class="section-header"><div class="index">04</div><h2>详解这个训练里的损失函数</h2></div>
+          <p>这次 FastApply 训练用的不是监督学习的 cross entropy，而是 MinT 的 <code class="inline">loss_fn=&quot;importance_sampling&quot;</code>。它对应 GRPO / policy-gradient 风格更新：同一个 prompt 采样多条 response，用 verifier reward 算组内 advantage，然后让高 advantage 轨迹概率上升、低 advantage 轨迹概率下降。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Datum 里四个核心输入</h3>
+              <ul>
+                <li><code class="inline">target_tokens</code>：当前序列每个位置要预测的下一个 token。</li>
+                <li><code class="inline">weights</code>：prompt 部分为 0，response 部分为 1，只训练生成段。</li>
+                <li><code class="inline">logprobs</code>：采样时旧策略 <code class="inline">π_old</code> 对生成 token 的 log probability。</li>
+                <li><code class="inline">advantages</code>：同组 reward 中心化后的相对优势，复制到 response 每个 token。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>直观公式</h3>
+              <pre><code>reward_i = verifier(output_i)
+adv_i = reward_i - mean(reward_group)
+ratio_t = exp(logπ_new(token_t) - logπ_old(token_t))
+loss ≈ - Σ weights_t · adv_i · ratio_t</code></pre>
+              <p>所以 advantage 为正时，模型被推动提高这条输出的概率；advantage 为负时，模型被推动降低这条输出的概率。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">采样：用当前 LoRA sampler 生成 candidate updated code。</div>
+            <div class="flow-step" data-step="2">打分：检查 exact match、tag 格式、是否有多余文本、语法合法性。</div>
+            <div class="flow-step" data-step="3">中心化：同组内 reward 减均值，得到 advantage。</div>
+            <div class="flow-step" data-step="4">importance sampling：用旧 logprob 和新 logprob 的 ratio 做离策略校正。</div>
+          </div>
+
+          <div class="callout">精髓：这个 loss 学的不是“标准答案 token 长什么样”，而是“在这一组采样里，哪条生成轨迹更值得提高概率”。这就是 GRPO 和普通 SFT 的根本区别。</div>
+          <div class="refs">本次报告中：policy rollout reward=0.95、advantage=-0.025；oracle rollout reward=1.0、advantage=+0.025；<code class="inline">loss:mean=0.0001722524906026906</code>。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-good-reward-bad-grpo">
+          <div class="section-header"><div class="index">05</div><h2>如果 reward 很好，但最终 GRPO 效果不好，可能是什么原因</h2></div>
+          <p>reward 分数高不等于训练效果一定好。GRPO 优化的是 reward 定义下的相对概率，如果 reward、采样分布、advantage、LoRA 容量或数据覆盖有问题，最后可能出现“reward 看着不错，模型真实效果反而一般”。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Reward 本身的问题</h3>
+              <ul>
+                <li><strong>reward hacking</strong>：模型学会讨好 verifier，而不是真正会 Apply。</li>
+                <li><strong>reward 太稀疏</strong>：只有 exact match 才给分，绝大多数样本都是 0，advantage 信号很弱。</li>
+                <li><strong>reward 权重错</strong>：例如 tag 格式权重太高，模型只学会包装标签，代码合并能力没提升。</li>
+                <li><strong>离线指标不代表真实场景</strong>：tiny fixture 上 reward 高，但真实 Git diff 更长、更乱、上下文更多。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>GRPO 训练过程的问题</h3>
+              <ul>
+                <li><strong>group size 太小</strong>：组内比较不稳定，advantage 噪声大。本次 smoke 是 1 policy + 1 oracle，只是跑通链路。</li>
+                <li><strong>采样温度不合适</strong>：温度太低，样本都差不多；温度太高，样本太乱，reward 噪声大。</li>
+                <li><strong>ratio 漂移</strong>：新旧策略差太多时，importance ratio 方差变大，训练不稳。</li>
+                <li><strong>学习率过大</strong>：容易把 LoRA 往某些 reward shortcut 上推过头。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>数据覆盖问题</h3>
+              <p>FastApply 的难点在长上下文、多 hunk、模糊 SEARCH、跨函数依赖、缩进/注释保留。如果训练数据只有短函数，reward 再高也无法保证长文件 Apply 表现。</p>
+            </article>
+            <article class="mini-card">
+              <h3>模型容量问题</h3>
+              <p>LoRA rank 太小、目标层太少，可能 reward 能推一点格式，但推不动复杂代码编辑能力；rank 太大又可能过拟合 tiny reward。</p>
+            </article>
+          </div>
+
+          <div class="callout">排查顺序：先看 reward 是否真的覆盖业务目标，再看 group size/温度/学习率，再看数据难度分布，最后看 LoRA rank 和目标层容量。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-lora-rank-impact">
+          <div class="section-header"><div class="index">06</div><h2>LoRA 的 rank 过小或者过大有什么影响</h2></div>
+          <p>LoRA rank 决定低秩增量矩阵的表达能力。rank 越大，可训练参数越多，能拟合更复杂的行为；rank 越小，训练更省资源，但可能表达不够。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>rank 过小</h3>
+              <ul>
+                <li>优点：显存低、训练快、不容易剧烈破坏原模型。</li>
+                <li>缺点：容量不足，复杂 patch 合并、多文件风格迁移、长上下文定位能力提升有限。</li>
+                <li>表现：reward 有一点提升，但遇到长 diff 或多 hunk 时仍然输出不完整、漏改、格式飘。</li>
+                <li>适合：只做格式约束、短代码片段、轻量行为校正。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>rank 过大</h3>
+              <ul>
+                <li>优点：容量更强，能学复杂任务分布。</li>
+                <li>缺点：显存和优化状态增加，训练变慢，更容易过拟合 tiny 数据。</li>
+                <li>风险：reward shortcut、输出风格塌缩、泛化下降。</li>
+                <li>适合：真实数据量足够大、任务变化多、需要强编辑能力时。</li>
+              </ul>
+            </article>
+          </div>
+
+          <pre><code>LoRA 参数量大致 ∝ rank · (输入维度 + 输出维度) · 目标层数量</code></pre>
+          <p>本次用 <code class="inline">rank=16</code> 是一个烟测级折中：足够让 Qwen3 4B 在 Apply 格式和简单合并上产生变化，又不会把资源成本拉得太高。真实训练可以从 16/32 起步，对比 reward、验证集 exact apply、语法 pass rate 和长 diff 表现。</p>
+
+          <div class="callout">经验上：rank 小了像“只调提示词风格”，rank 大了像“给模型更多改写自由”。FastApply 这种代码编辑任务，如果数据足够，rank 16–64 都值得试；tiny 数据不建议盲目加大。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-resource-requirements">
+          <div class="section-header"><div class="index">07</div><h2>这个训练需要多少显存、资源和什么卡配置</h2></div>
+          <p>本次实际训练跑在 MinT 远程服务上，本地服务器不需要 GPU；本地只负责构造数据、发起采样和训练请求。真正显存消耗在 MinT 侧，取决于 Qwen3 4B、LoRA rank、sequence length、group size、batch size 和是否并发采样。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>本次 tiny smoke 的资源形态</h3>
+              <ul>
+                <li>模型：<code class="inline">Qwen/Qwen3-4B-Instruct-2507</code></li>
+                <li>LoRA rank：16</li>
+                <li>group：1 policy sample + 1 oracle rollout</li>
+                <li>GRPO datums：2</li>
+                <li>response tokens：145</li>
+                <li>本地 GPU：不需要</li>
+                <li>耗时：约 40 分钟级别，主要花在远程 4B 采样和 GRPO step。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>如果自己部署训练</h3>
+              <ul>
+                <li><strong>最低实验</strong>：单张 24GB 卡可能只能做很小 batch、短序列、LoRA/量化/gradient checkpointing。</li>
+                <li><strong>舒适实验</strong>：单张 48GB 或 80GB 卡更合适，能容纳更长上下文和更大 group。</li>
+                <li><strong>正式 GRPO</strong>：建议多卡或远程训练服务，因为 rollout sampling + policy update 会叠加吞吐压力。</li>
+                <li><strong>推理采样</strong>：还要给 sampler 留显存；GRPO 不只是训练，还要反复生成候选。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">显存主要来自 base model 权重、KV cache、activation、LoRA 参数与 optimizer state。</div>
+            <div class="flow-step" data-step="2">sequence 越长，activation 和 KV cache 越大；FastApply 长文件场景会明显吃资源。</div>
+            <div class="flow-step" data-step="3">group size 越大，采样吞吐和训练 batch 都变重，但 advantage 更稳定。</div>
+            <div class="flow-step" data-step="4">rank 越大，LoRA 参数和 optimizer state 增加，但相对 4B base 权重仍是小头。</div>
+          </div>
+
+          <div class="callout">实操建议：用 MinT 远程训练时，本地不用配 GPU；如果自建，Qwen3 4B + LoRA + GRPO 建议至少从 48GB 级别 GPU 做舒适实验，正式长上下文/多 group 训练优先用 80GB 或多卡。</div>
+          <div class="refs">注意：这是工程估算；实际显存还会受框架、精度、上下文长度、batch packing、checkpointing、optimizer 和采样并发影响。</div>
         </section>
 
 
