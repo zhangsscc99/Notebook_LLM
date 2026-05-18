@@ -1148,7 +1148,7 @@ Okay, let's see. The question is</code></pre>
 
         <section class="section reveal" id="fastapply-qwen3-4b-pipeline-report">
           <div class="section-header"><div class="index">02</div><h2>FastApply GRPO 完整复刻：Qwen3 4B MinT 训练报告</h2></div>
-          <p>你指出得对：上一版只是 SFT smoke test，不是图片里的完整 pipeline。现在已按 18 张图重新复刻：<strong>source + patch → 采样 rollouts → FastApply verifier reward → group-relative advantages → <code class="inline">loss_fn=&quot;importance_sampling&quot;</code> 的 GRPO 训练</strong>。数据仍然只用 1–2 条 tiny test 样本，不扩造大数据。</p>
+          <p>现在已按 18 张图里的训练路线复刻：<strong>source + patch → 采样 rollouts → FastApply verifier reward → group-relative advantages → <code class="inline">loss_fn=&quot;importance_sampling&quot;</code> 的 GRPO 训练</strong>。数据仍然只用 1–2 条 tiny test 样本，不扩造大数据。</p>
 
           <div class="grid-2">
             <article class="mini-card">
@@ -1158,7 +1158,7 @@ Okay, let's see. The question is</code></pre>
                 <li>Prompt contract：只输出 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code>，不要解释、不要 Markdown fence、不要冲突标记。</li>
                 <li>Patch 形式：SEARCH/REPLACE、structured changes、unified diff/AST 变更都预留。</li>
                 <li>数据构造：Git commit/diff → old/new source → patch replay 校验 → 过滤 → 去重 → AST 顶层作用域检查。</li>
-                <li>训练核心：不是只做 SFT，而是用 verifier reward 做 <strong>GRPO</strong>。</li>
+                <li>训练核心：用 verifier reward 做 <strong>GRPO</strong>，对应 MinT 的 <code class="inline">importance_sampling</code>。</li>
                 <li>服务化：训练后保存 LoRA sampler，并用同一 Apply prompt 做采样验证。</li>
               </ul>
             </article>
@@ -1220,7 +1220,7 @@ def fetch_user(user_id, client, cache=None):
             </article>
           </div>
 
-          <div class="callout">结论：现在的版本已经不是 SFT 版，而是按图片补齐了 FastApply 的数据构造、patch replay、过滤去重、AST 边界、verifier reward、GRPO advantage 和 MinT <code class="inline">importance_sampling</code> 训练。当前只用 tiny test 数据验证链路，后续扩展时直接把真实 Git diff 数据接到同一 pipeline。</div>
+          <div class="callout">结论：这个问题已改成 GRPO 版，按图片补齐了 FastApply 的数据构造、patch replay、过滤去重、AST 边界、verifier reward、GRPO advantage 和 MinT <code class="inline">importance_sampling</code> 训练。当前只用 tiny test 数据验证链路，后续扩展时直接把真实 Git diff 数据接到同一 pipeline。</div>
           <div class="refs">代码与报告：<code class="inline">/root/rlhf/fastapply_pipeline/train_mint_fastapply_grpo.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/grpo.py</code>、<code class="inline">/root/rlhf/fastapply_pipeline/rewards.py</code>、<code class="inline">/root/rlhf/reports/fastapply_grpo_training_report.json</code>。</div>
         </section>
 
