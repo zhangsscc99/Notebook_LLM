@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">14 sections</span>
+            <span class="toc-count">17 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -927,6 +927,9 @@
             <a href="#fastapply-exact-only-reward">12 · reward 如果只拿 exact 会怎么样</a>
             <a href="#fastapply-multilang-syntax-check">13 · syntax 怎么支持更多编程语言</a>
             <a href="#fastapply-updated-tag-parser">14 · updated 标签是 LLM 解析还是规则解析</a>
+            <a href="#fastapply-no-extra-after-extraction">15 · 既然能抽 updated 为什么还要 no extra prose</a>
+            <a href="#fastapply-tagformat-vs-noextra">16 · tag_format 和 no_extra_prose 到底区别在哪</a>
+            <a href="#fastapply-extra-prose-risk">17 · 多余解释会给训练和下游带来什么风险</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1866,6 +1869,123 @@ candidate = m.group(1) if m else None</code></pre>
           </div>
 
           <div class="callout">结论：不要把 updated 当成“LLM 自己解析”。它是 <strong>LLM 按协议生成 + 程序规则抽取</strong>。这样更稳定、可控、便宜，也避免每次抽标签还要再调用一个 LLM。</div>
+        </section>
+
+
+        <section class="section reveal" id="fastapply-no-extra-after-extraction">
+          <div class="section-header"><div class="index">15</div><h2>既然规则已经能抽到 updated 标签，为什么 reward 里还要 no_extra_prose</h2></div>
+          <p>关键点是：<strong>规则抽取 updated 是为了拿到 candidate 去判断“代码内容对不对”；no_extra_prose 是为了判断“模型原始输出干不干净”。</strong> 这两个目标不一样。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>抽取只服务内容评分</h3>
+              <p>项目会先用规则从原始输出里抽取 <code class="inline">&lt;updated&gt;...&lt;/updated&gt;</code> 内部代码：</p>
+              <pre><code>extracted = extract_updated_tag(output)
+candidate = extracted if extracted is not None else output
+exact = candidate == expected_source</code></pre>
+              <p>所以即使原始输出是：</p>
+              <pre><code>好的，修改如下：
+&lt;updated&gt;
+def add(a,b): return a+b+1
+&lt;/updated&gt;
+解释：这里把 +1 加上了。</code></pre>
+              <p>规则仍然能抽出中间代码，exact / similarity / syntax 可能很高。</p>
+            </article>
+            <article class="mini-card">
+              <h3>no_extra_prose 服务输出纪律</h3>
+              <p><code class="inline">no_extra_prose</code> 检查的是原始输出整体：</p>
+              <pre><code>stripped = output.strip()
+no_extra = stripped.startswith("&lt;updated&gt;") \
+        and stripped.endswith("&lt;/updated&gt;")</code></pre>
+              <p>它不是再判断代码内容，而是惩罚标签外的“好的、解释、Markdown fence、废话、额外总结”。</p>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">规则抽取：让 reward 能评估代码内容，不被前后废话完全干扰。</div>
+            <div class="flow-step" data-step="2">exact/similarity/syntax：评估抽出来的 candidate 是否正确。</div>
+            <div class="flow-step" data-step="3">no_extra_prose：回头检查 raw output 是否只有机器需要的标签块。</div>
+            <div class="flow-step" data-step="4">GRPO：同时奖励“代码对”和“输出干净”。</div>
+          </div>
+
+          <div class="callout">所以不是“抽掉两段后 no_extra_prose 没意义”。正相反：<strong>抽取让内容评分鲁棒；no_extra_prose 防止模型学会在正确代码外面继续聊天。</strong></div>
+        </section>
+
+        <section class="section reveal" id="fastapply-tagformat-vs-noextra">
+          <div class="section-header"><div class="index">16</div><h2>tag_format 和 no_extra_prose 到底区别在哪</h2></div>
+          <p>这两个字段很像，但判断的是两个不同层级：<strong>tag_format 看“能不能解析”，no_extra_prose 看“是不是只有解析目标”。</strong></p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>tag_format：有没有合法容器</h3>
+              <pre><code>&lt;updated&gt;
+代码
+&lt;/updated&gt;</code></pre>
+              <p>只要能抽到 updated 标签，tag_format 就可以给 1。即使标签前后还有解释，只要正则能找到标签，它仍然算“有容器”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>no_extra_prose：容器外有没有垃圾</h3>
+              <pre><code>好的，代码如下：
+&lt;updated&gt;
+代码
+&lt;/updated&gt;
+这就是修改原因。</code></pre>
+              <p>这个例子 tag_format=1，但 no_extra_prose=0。因为它能解析，但原始输出不是纯粹的 updated 块。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>四种组合</h3>
+              <ul>
+                <li><strong>tag=1, no_extra=1</strong>：最理想，只输出 <code class="inline">&lt;updated&gt;代码&lt;/updated&gt;</code>。</li>
+                <li><strong>tag=1, no_extra=0</strong>：能解析，但模型还在聊天或输出 Markdown。</li>
+                <li><strong>tag=0, no_extra=0</strong>：没按协议输出，自动化最危险。</li>
+                <li><strong>tag=0, no_extra=1</strong>：基本不成立，因为没有 updated 标签就不可能以它开头结尾。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>为什么都要保留</h3>
+              <p>如果只有 tag_format，模型会觉得“只要我把代码包在标签里，外面说几句也没关系”。如果只有 no_extra_prose，没有单独 tag_format，就不容易区分“完全没标签”和“标签结构存在但外面有杂质”。</p>
+            </article>
+          </div>
+
+          <div class="callout">一句话：<strong>tag_format 奖励可解析边界；no_extra_prose 奖励无噪声输出。</strong> 一个管“找得到”，一个管“只有它”。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-extra-prose-risk">
+          <div class="section-header"><div class="index">17</div><h2>多余解释会给训练和下游带来什么风险</h2></div>
+          <p>在代码 Apply 任务里，多余解释不是小问题。因为这个模型的输出通常不是给人看的，而是要给下游程序自动接上。no_extra_prose 的价值就在这里。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>训练侧风险</h3>
+              <ul>
+                <li><strong>reward hacking</strong>：模型可能学会“代码正确 + 外面胡说”，exact 仍高，但行为不干净。</li>
+                <li><strong>分布污染</strong>：GRPO 会提高高 reward 轨迹概率，如果不罚废话，模型会保留聊天习惯。</li>
+                <li><strong>长度浪费</strong>：多余 token 影响采样成本，也挤占长代码上下文。</li>
+                <li><strong>多标签歧义</strong>：如果输出多个 <code class="inline">updated</code> 块，不同 extractor 可能取 first 或 last，训练和部署不一致。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>下游工程风险</h3>
+              <ul>
+                <li>某些接入方可能不是用我们这个鲁棒正则，而是直接拿 raw output 写文件。</li>
+                <li>Markdown fence、解释文本、日志前缀会让 apply / formatter / compiler 直接失败。</li>
+                <li>额外自然语言可能被当成代码注释或非法 token 混入文件。</li>
+                <li>安全上也更难控：标签外文本可能携带无关指令、路径、环境信息。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1">训练时允许抽取，是为了不要因为一点格式噪声完全丢掉内容 reward。</div>
+            <div class="flow-step" data-step="2">训练时惩罚 extra prose，是为了逐步把模型推向纯机器输出。</div>
+            <div class="flow-step" data-step="3">上线时最好要求 raw output 本身就是唯一 updated 块。</div>
+            <div class="flow-step" data-step="4">最终目标：下游可以直接解析、应用、测试，不需要人工清洗。</div>
+          </div>
+
+          <div class="callout">结论：<strong>规则抽取是容错机制，no_extra_prose 是行为约束。</strong> 容错不是纵容；训练里两者同时存在，才能既不浪费接近正确的样本，又把模型输出训得足够干净。</div>
         </section>
 
 
