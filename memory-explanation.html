@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">7 sections</span>
+            <span class="toc-count">8 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -920,6 +920,7 @@
             <a href="#fastapply-good-reward-bad-grpo">05 · reward 很好但 GRPO 效果不好怎么办</a>
             <a href="#fastapply-lora-rank-impact">06 · LoRA rank 过小或过大的影响</a>
             <a href="#fastapply-resource-requirements">07 · 显存资源与卡配置</a>
+            <a href="#rl-master-72-image-grpo-migration">08 · 72 张图 RL-master FastApply GRPO 迁移报告</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -1441,6 +1442,63 @@ loss ≈ - Σ weights_t · adv_i · ratio_t</code></pre>
 
           <div class="callout">实操建议：用 MinT 远程训练时，本地不用配 GPU；如果自建，Qwen3 4B + LoRA + GRPO 建议至少从 48GB 级别 GPU 做舒适实验，正式长上下文/多 group 训练优先用 80GB 或多卡。</div>
           <div class="refs">注意：这是工程估算；实际显存还会受框架、精度、上下文长度、batch packing、checkpointing、optimizer 和采样并发影响。</div>
+        </section>
+
+
+        <section class="section reveal" id="rl-master-72-image-grpo-migration">
+          <div class="section-header"><div class="index">08</div><h2>72 张图 RL-master FastApply GRPO 源码迁移报告</h2></div>
+          <p>这次按 <code class="inline">/root/rlhf/images</code> 里的 72 张参考图，把 RL-master / verl 风格 FastApply GRPO pipeline 迁移到当前训练项目。核心不是 SFT，而是 <strong>data → rollout(n=8) → reward → group advantage → policy/KL/entropy loss → update</strong> 的 GRPO 闭环。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>新增源码入口</h3>
+              <ul>
+                <li><code class="inline">rl_master/configs/config-rl-fastapply.yaml</code>：复刻图里的 rollout batch、seq_len=8192、n=8、temperature/top_p=0.99、top_k=50、GRPO advantage 配置。</li>
+                <li><code class="inline">rl_master/scripts/run_fastapply_grpo_smoke.py</code>：离线可跑的 8-rollout GRPO smoke，输出逐样本 reward、advantage、policy loss、KL loss、entropy bonus。</li>
+                <li><code class="inline">rl_master/scripts/run_fastapply_ver1.py</code>：FastApply 环境 + rule reward smoke。</li>
+                <li><code class="inline">fastapply_pipeline/train_mint_fastapply_grpo.py</code>：真实 MinT Qwen3 4B LoRA GRPO 入口，使用 <code class="inline">loss_fn=&quot;importance_sampling&quot;</code>。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>图片模块迁移范围</h3>
+              <ul>
+                <li>1–18：训练脚本、配置、rollout、GRPO loss 总览。</li>
+                <li>19–30：<code class="inline">score.py</code>、<code class="inline">utils.py</code>、FastApply environment，reward = 0.8 correctness + 0.2 validity。</li>
+                <li>32–37：<code class="inline">apply.yaml</code>、<code class="inline">generate.yaml</code>、<code class="inline">judge.yaml</code> prompt 协议。</li>
+                <li>38–56：extractor、evaluation strategy、agent、pipeline、evalfastapply。</li>
+                <li>57–72：LLM wrapper、Inference、PromptTemplate、JSON / pattern parser 支撑层。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>采样。</strong>同一个 FastApply prompt 生成 8 条候选 updated code，真实训练用 Qwen3 4B sampler；离线 smoke 用确定性候选复刻字段。</div>
+            <div class="flow-step" data-step="2"><strong>奖励。</strong>先 rule exact compare（忽略空白行），失败再走 judge prompt；环境层按 <code class="inline">0.8 * correctness + 0.2 * validity</code> 聚合。</div>
+            <div class="flow-step" data-step="3"><strong>优势。</strong>同组 reward 做标准化：<code class="inline">adv_i = (reward_i - mean) / std</code>，高分样本为正，低分样本为负。</div>
+            <div class="flow-step" data-step="4"><strong>损失。</strong>policy surrogate 用新旧 logprob ratio 与 advantage；再加 ref KL 惩罚，减 entropy bonus；真实 MinT 入口对应 <code class="inline">importance_sampling</code>。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>服务器验证命令</h3>
+              <pre><code>./mint_simple_training/.venv/bin/python -m rl_master.scripts.run_fastapply_ver1
+./mint_simple_training/.venv/bin/python -m rl_master.scripts.run_fastapply_grpo_smoke
+./mint_simple_training/.venv/bin/python -m rl_master.scripts.evaluation.evalfastapply
+./mint_simple_training/.venv/bin/python tests/test_rl_master_fastapply.py</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>已跑通结果</h3>
+              <ul>
+                <li><code class="inline">run_fastapply_ver1</code>：env_reward=1.0，rule_score=1.0。</li>
+                <li><code class="inline">run_fastapply_grpo_smoke</code>：生成 8 条 rollout，报告 mean_reward、mean_loss 和每条 loss 分解。</li>
+                <li><code class="inline">evalfastapply</code>：accuracy=1.0，rows=1。</li>
+                <li>测试：<code class="inline">rl_master_fastapply tests passed</code>。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">结论：72 张图里的 RL-master FastApply pipeline 已迁移成可运行代码；当前只用 tiny test 数据确保链路能跑，不虚构大数据。训练项目已提交推送到 <code class="inline">zhangsscc99/RLHF_GRPO</code>，commit 为 <code class="inline">230f28d</code>。</div>
+          <div class="refs">报告文件：<code class="inline">/root/rlhf/reports/rl_master_72_image_reproduction_report.md</code>、<code class="inline">/root/rlhf/reports/rl_master_72_image_mapping.json</code>、<code class="inline">/root/rlhf/reports/rl_master_fastapply_grpo_smoke.json</code>。</div>
         </section>
 
 
