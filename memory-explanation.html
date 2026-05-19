@@ -990,11 +990,14 @@
         <details class="toc-group" id="wan22TocGroup" open>
           <summary>
             <span class="toc-group-title">Wan2.2 视频生成</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">5 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#wan22-project-overview">01 · 项目概览</a>
             <a href="#wan22-app-layer-prompt-to-video">02 · 应用层怎么由提示词生成视频</a>
+            <a href="#wan22-video-latent">03 · 视频 latent 是什么</a>
+            <a href="#wan22-vae-explanation">04 · VAE 是什么，在 Wan2.2 里负责什么</a>
+            <a href="#wan22-architecture-vs-llm">05 · 视频生成模型架构是什么，对比 LLM 多了什么组件</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6635,6 +6638,166 @@ index.search(query_vec, top_k)</code></pre>
 
           <div class="callout">最短总结：<strong>提示词生成视频 = 文本条件控制随机噪声逐步变成视频。</strong>用户看到的是“一句话生成 mp4”，源码里实际是 T5 编码 prompt、WanModel 按 timestep 多轮预测去噪方向、scheduler 更新 latent、VAE 解码视频帧。</div>
           <div class="refs">参考源码：<code class="inline">/root/Wan2.2/generate.py:345-454</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:203-378</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:346-449</code>、<code class="inline">/root/Wan2.2/wan/utils/utils.py:90-119</code>、<code class="inline">/root/Wan2.2/wan/textimage2video.py</code>、<code class="inline">/root/Wan2.2/wan/speech2video.py</code>、<code class="inline">/root/Wan2.2/wan/animate.py</code>。</div>
+        </section>
+
+        <section class="section reveal" id="wan22-video-latent">
+          <div class="section-header"><div class="index">WAN3</div><h2>视频 latent 是什么</h2></div>
+          <p><strong>视频 latent</strong> 可以理解成“被 VAE 压缩过的视频表示”。它不是 RGB 像素帧，而是一个更小的四维张量：<code class="inline">[C, F_latent, H_latent, W_latent]</code>。Wan2.2 真正生成的不是一帧帧像素，而是在这个 latent 空间里从随机噪声逐步去噪，最后再由 VAE 解码回视频帧。</p>
+          <div class="callout"><strong>一句话：</strong>视频 latent 是视频的压缩工作空间。扩散模型/DiT 负责把随机 latent 修成有语义、有运动、有画面的 latent；VAE 负责把 latent 还原成肉眼能看的像素视频。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>原始视频太大。</strong>如果直接在像素空间生成 720P、几十到上百帧视频，token/像素数量巨大，Transformer 和扩散采样成本会非常高。</div>
+            <div class="flow-step" data-step="2"><strong>VAE 先定义压缩空间。</strong>配置里的 <code class="inline">vae_stride</code> 决定压缩比例。T2V/I2V A14B 是 <code class="inline">(4,8,8)</code>，表示时间约压 4 倍，空间高宽各压 8 倍；TI2V-5B 是 <code class="inline">(4,16,16)</code>，空间压缩更强。</div>
+            <div class="flow-step" data-step="3"><strong>推理时先算 target_shape。</strong><code class="inline">WanT2V.generate()</code> 用 <code class="inline">self.vae.model.z_dim</code>、帧数、分辨率和 <code class="inline">vae_stride</code> 算出 latent shape。</div>
+            <div class="flow-step" data-step="4"><strong>初始 latent 是随机噪声。</strong>源码用 <code class="inline">torch.randn(target_shape...)</code> 创建噪声。这个噪声不是“乱码视频文件”，而是 latent 空间里的随机点。</div>
+            <div class="flow-step" data-step="5"><strong>WanModel 多步修改 latent。</strong>每个 timestep，WanModel 根据文本条件和当前 noisy latent 预测去噪方向，scheduler 更新 latent。</div>
+            <div class="flow-step" data-step="6"><strong>最后 decode 成视频。</strong>采样结束得到 <code class="inline">x0</code>，调用 <code class="inline">self.vae.decode(x0)</code> 才变成 <code class="inline">[C, N, H, W]</code> 视频帧张量，再保存为 mp4。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>latent 的形状怎么来的</h3>
+              <p>T2V 源码里直接写了：<code class="inline">target_shape = (z_dim, (F - 1) // stride_t + 1, H // stride_h, W // stride_w)</code>。所以帧数、分辨率越大，latent 仍然越大；但相比像素空间已经压缩很多。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么 channel 不是 3</h3>
+              <p>RGB 视频通道是 3，但 latent channel 是 VAE 学出来的特征维度。Wan2.2 的 <code class="inline">Wan2_2_VAE</code> 默认 <code class="inline">z_dim=48</code>；A14B 使用的 Wan2.1 VAE 也有自己的 latent channel 配置。这里的 channel 表示压缩特征，不是颜色通道。</p>
+            </article>
+            <article class="mini-card">
+              <h3>latent 里有没有“画面语义”</h3>
+              <p>有，但不是人类可读的文本语义。latent 是 VAE 学出来的连续特征空间，能保留颜色、纹理、局部形状、时序运动等足够重建视频的信息。扩散模型学的是如何在这个空间里移动，让 latent 更符合 prompt。</p>
+            </article>
+            <article class="mini-card">
+              <h3>latent 和 token 的关系</h3>
+              <p>WanModel 还会把 latent 继续做 <code class="inline">Conv3d patch_embedding</code>，切成时空 patch token 送入 Transformer。也就是：像素视频先压成 latent，latent 再 patchify 成 Transformer token。</p>
+            </article>
+          </div>
+
+          <pre><code>以 T2V 为例：
+输入：prompt + 目标分辨率 + 帧数
+1. 根据 vae_stride 算 latent 的 F/H/W
+2. torch.randn 初始化 latent 噪声
+3. WanModel + scheduler 在 latent 空间迭代去噪
+4. VAE decode(latent)
+5. save_video 写 mp4</code></pre>
+
+          <div class="callout">所以不要把视频 latent 理解成“缓存的视频文件”。它更像一张高维草稿纸：模型不直接画每个像素，而是在压缩空间里先画结构、运动和细节的隐式表示，最后由 VAE 翻译成真实视频。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Wan2.2/wan/text2video.py:253-288</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:335-368</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_t2v_A14B.py:15-18</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_ti2v_5B.py:15-17</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:377-396</code>。</div>
+        </section>
+
+        <section class="section reveal" id="wan22-vae-explanation">
+          <div class="section-header"><div class="index">WAN4</div><h2>VAE 是什么，在 Wan2.2 里负责什么</h2></div>
+          <p><strong>VAE</strong> 全称 Variational Autoencoder，直观上是一个“视频压缩器 + 视频解压器”。在视频生成模型里，它的重点不是聊天，也不是理解 prompt，而是把像素视频和 latent 表示互相转换。</p>
+          <div class="callout"><strong>一句话：</strong>VAE 的 encoder 把视频压缩成 latent，decoder 把 latent 还原成视频。Wan2.2 的 DiT 主模型只负责生成/修正 latent，真正输出像素帧靠 VAE decoder。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. Encoder：视频 → latent</h3>
+              <p>训练或图生视频条件处理时，encoder 可以把输入视频/图像条件压进 latent 空间。源码接口是 <code class="inline">Wan2_2_VAE.encode(videos)</code>，内部调用 <code class="inline">self.model.encode(...)</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. Decoder：latent → 视频</h3>
+              <p>文生视频推理的最后一步主要用 decoder。<code class="inline">WanT2V.generate()</code> 结束 denoising 后调用 <code class="inline">self.vae.decode(x0)</code>，把模型生成的 latent 变成视频帧。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 为什么叫“变分”</h3>
+              <p>VAE 训练时通常让 encoder 学一个连续潜变量分布，并约束 latent 空间平滑可采样。对生成模型来说，这种连续 latent 空间更适合扩散模型逐步去噪，而不是离散地逐像素生成。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. Wan2.2 VAE 的视频特征</h3>
+              <p><code class="inline">vae2_2.py</code> 不是普通 2D 图片 autoencoder，而是视频 VAE：有 <code class="inline">CausalConv3d</code>、<code class="inline">downsample3d</code>、<code class="inline">upsample3d</code>、ResidualBlock，并带时间维缓存逻辑，服务于视频时序建模。</p>
+            </article>
+          </div>
+
+          <p>Wan2.2 里 VAE 的位置可以这样记：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>输入端。</strong>如果任务有图片/视频条件，VAE encoder 可把条件内容变成 latent 条件，让模型沿着输入主体、构图或首帧继续生成。</div>
+            <div class="flow-step" data-step="2"><strong>生成中。</strong>WanModel 不直接处理 RGB 帧，而是处理 VAE latent。这样序列更短，显存和算力压力更低。</div>
+            <div class="flow-step" data-step="3"><strong>输出端。</strong>采样后的 latent 还不能直接播放，必须经过 VAE decoder 还原成像素视频。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Wan2.1 VAE vs Wan2.2 VAE</h3>
+              <p>A14B T2V/I2V 配置使用 <code class="inline">Wan2.1_VAE.pth</code>，<code class="inline">vae_stride=(4,8,8)</code>。TI2V-5B 配置使用 <code class="inline">Wan2.2_VAE.pth</code>，<code class="inline">vae_stride=(4,16,16)</code>，空间压缩更强，所以更适合降低 720P 推理成本。</p>
+            </article>
+            <article class="mini-card">
+              <h3>VAE 会不会理解 prompt</h3>
+              <p>不会。prompt 理解主要由 T5 和 WanModel 的 cross-attention 完成。VAE 更像编解码器：它决定 latent 和像素之间如何互译，影响清晰度、纹理、时序一致性和压缩损失。</p>
+            </article>
+          </div>
+
+          <pre><code>VAE 在 Wan2.2 里的角色：
+像素视频 --encode--> video latent --WanModel denoise--> clean latent --decode--> 像素视频
+
+文生视频时：通常从随机 latent 开始，最后重点用 decode。
+图生/文图生视频时：还会把输入图像/条件编码进 latent 或条件分支。</code></pre>
+
+          <div class="callout">最短总结：<strong>VAE 是视频生成模型的“像素接口层”。</strong>没有它，DiT 要直接在巨大像素空间生成；有了它，DiT 可以在更小、更连续的 latent 空间里工作。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Wan2.2/wan/modules/vae2_2.py:17-169</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_2.py:888-1051</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_1.py:619-779</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:367-368</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_t2v_A14B.py:15-18</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_ti2v_5B.py:15-17</code>。</div>
+        </section>
+
+        <section class="section reveal" id="wan22-architecture-vs-llm">
+          <div class="section-header"><div class="index">WAN5</div><h2>Wan2.2 视频生成模型架构是什么，对比 LLM 多了什么组件</h2></div>
+          <p>Wan2.2 和 LLM 都大量使用 Transformer，但任务范式完全不同：LLM 是<strong>自回归 next token prediction</strong>，输入文本 token，逐个输出文本 token；Wan2.2 是<strong>视频 latent diffusion / flow matching</strong>，输入 prompt 条件和随机视频 latent，通过多步 denoising 输出视频 latent，再解码成视频。</p>
+          <div class="callout"><strong>一句话：</strong>LLM 的核心循环是“前文 token → 下一个 token”；Wan2.2 的核心循环是“noisy video latent + 文本条件 + timestep → 更干净的视频 latent”。所以视频生成模型比 LLM 多了 VAE、视频 latent、scheduler/timestep、3D patch embedding、CFG、视频时空位置编码，以及 A14B 的高/低噪声 expert 切换。</div>
+
+          <p>从源码看，Wan2.2 文生视频的主架构可以拆成这几层：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>T5 文本编码器。</strong>prompt 先进入 <code class="inline">T5EncoderModel</code>，变成 <code class="inline">context</code>。这相当于给视频模型提供语义条件，不是直接让视频 DiT 自己 tokenizer 文本。</div>
+            <div class="flow-step" data-step="2"><strong>VAE latent 空间。</strong>输出空间不是文本 token，而是 VAE 定义的视频 latent。配置里的 <code class="inline">vae_stride</code> 控制时间/空间压缩比例。</div>
+            <div class="flow-step" data-step="3"><strong>WanModel / Video DiT。</strong><code class="inline">wan/modules/model.py</code> 的 <code class="inline">WanModel</code> 用 <code class="inline">Conv3d</code> 做 3D patch embedding，把 latent 视频切成时空 token，再用多层 <code class="inline">WanAttentionBlock</code> 做建模。</div>
+            <div class="flow-step" data-step="4"><strong>timestep embedding。</strong>扩散/flow matching 每一步都有噪声时间 <code class="inline">t</code>。WanModel 用 <code class="inline">sinusoidal_embedding_1d</code>、<code class="inline">time_embedding</code>、<code class="inline">time_projection</code> 把 timestep 注入网络。</div>
+            <div class="flow-step" data-step="5"><strong>文本 cross-attention。</strong>视频 token 在 Transformer block 中通过 cross-attention 读取文本 <code class="inline">context</code>，让画面主体、动作、风格跟 prompt 对齐。</div>
+            <div class="flow-step" data-step="6"><strong>Scheduler / solver。</strong><code class="inline">FlowUniPCMultistepScheduler</code> 或 <code class="inline">FlowDPMSolverMultistepScheduler</code> 决定 timestep 序列和 latent 更新公式。LLM 通常没有这种外部采样 ODE/SDE solver。</div>
+            <div class="flow-step" data-step="7"><strong>CFG。</strong>每步同时跑正向 prompt 条件和负向/空条件，再用 <code class="inline">uncond + scale * (cond - uncond)</code> 放大提示词方向。</div>
+            <div class="flow-step" data-step="8"><strong>VAE decode。</strong>denoising 后的 latent 仍不是视频文件，必须由 VAE decoder 转成 RGB 帧，再保存成 mp4。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>和 LLM 相同的地方</h3>
+              <p>都有大规模参数、embedding、Transformer block、attention、FFN、归一化、位置编码思想。WanModel 里也有 token 序列，只是 token 来自视频 latent patch，而不是文本 tokenizer。</p>
+            </article>
+            <article class="mini-card">
+              <h3>生成方式不同</h3>
+              <p>LLM 一般按 token 顺序生成：第 1 个、第 2 个、第 3 个。Wan2.2 是全局 latent 反复迭代：同一个视频 latent 在 40/50 个 timestep 中被整体更新，逐步从噪声变清晰。</p>
+            </article>
+            <article class="mini-card">
+              <h3>输入输出载体不同</h3>
+              <p>LLM 的输入输出核心是离散文本 token；Wan2.2 的核心载体是连续视频 latent。文本只是条件，最终目标是连续的时空张量。</p>
+            </article>
+            <article class="mini-card">
+              <h3>A14B 还有 expert 切换</h3>
+              <p>T2V/I2V A14B 配置有 <code class="inline">high_noise_checkpoint</code> 和 <code class="inline">low_noise_checkpoint</code>。采样时根据 <code class="inline">boundary</code> 按 timestep 切换 expert：高噪声阶段偏整体结构，低噪声阶段偏细节。</p>
+            </article>
+          </div>
+
+          <p>如果用“LLM 对照表”记忆，差异会更清楚：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>LLM：文本 token 管线</h3>
+              <p><code class="inline">文本 → tokenizer → token embedding + position → Transformer decoder → logits → sampling → 下一个 token</code>。循环终点是生成足够多文本 token。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Wan2.2：视频 latent 管线</h3>
+              <p><code class="inline">prompt → T5 context；随机 latent → 3D patch token + timestep → Video DiT → scheduler 更新 latent → VAE decode → mp4</code>。循环终点是 timestep 采样完成。</p>
+            </article>
+          </div>
+
+          <pre><code>Wan2.2 比典型 LLM 多出来的关键组件：
+1. T5 text encoder：单独编码 prompt
+2. VAE encoder/decoder：像素视频和 latent 互转
+3. video latent：连续时空生成空间
+4. 3D patch embedding / unpatchify：把视频 latent 转成 Transformer token 再还原
+5. timestep embedding：告诉模型当前噪声阶段
+6. scheduler / solver：控制 denoising 轨迹
+7. CFG：正向/负向条件组合，增强 prompt 对齐
+8. video RoPE：按帧、高、宽建模时空位置
+9. high/low noise experts：A14B 按去噪阶段切模型</code></pre>
+
+          <div class="callout">最短总结：<strong>Wan2.2 不是“会输出视频的 LLM”，而是“文本条件控制的视频 latent 扩散系统”。</strong>Transformer 只是中间的主干网络；围绕它还必须有 VAE、scheduler、timestep、视频 patch、CFG 和多模态条件接口。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Wan2.2/wan/modules/model.py:294-520</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:253-368</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_t2v_A14B.py:19-37</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_ti2v_5B.py:19-36</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_2.py:888-1051</code>、<code class="inline">/root/Wan2.2/generate.py:403-454</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
