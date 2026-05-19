@@ -990,10 +990,11 @@
         <details class="toc-group" id="wan22TocGroup" open>
           <summary>
             <span class="toc-group-title">Wan2.2 视频生成</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#wan22-project-overview">01 · 项目概览</a>
+            <a href="#wan22-app-layer-prompt-to-video">02 · 应用层怎么由提示词生成视频</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6557,6 +6558,83 @@ index.search(query_vec, top_k)</code></pre>
 
           <div class="callout">最短总结：<strong>Wan2.2 = 视频生成大模型的完整推理工程。</strong>它的关键不是一个单文件 demo，而是“配置系统 + 多任务 pipeline + T5 条件编码 + VAE latent 压缩 + WanModel/DiT denoising + MoE expert 切换 + FSDP/Ulysses/CPU offload”的组合。</div>
           <div class="refs">本地源码：<code class="inline">/root/Wan2.2</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">INSTALL.md</code>、<code class="inline">generate.py</code>、<code class="inline">wan/configs/__init__.py</code>、<code class="inline">wan/configs/wan_t2v_A14B.py</code>、<code class="inline">wan/configs/wan_i2v_A14B.py</code>、<code class="inline">wan/configs/wan_ti2v_5B.py</code>、<code class="inline">wan/configs/wan_s2v_14B.py</code>、<code class="inline">wan/configs/wan_animate_14B.py</code>、<code class="inline">wan/text2video.py</code>、<code class="inline">wan/image2video.py</code>、<code class="inline">wan/textimage2video.py</code>、<code class="inline">wan/speech2video.py</code>、<code class="inline">wan/animate.py</code>、<code class="inline">wan/modules/model.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="wan22-app-layer-prompt-to-video">
+          <div class="section-header"><div class="index">WAN2</div><h2>应用层：Wan2.2 怎么由提示词生成视频</h2></div>
+          <p>从应用层看，用户只输入一句提示词，比如“两个穿拳击服的猫在舞台上打拳”，Wan2.2 最后输出一个 mp4。但中间不是 LLM 直接“写出视频”，而是<strong>提示词条件控制下的视频扩散/flow matching 采样过程</strong>：先把文字变成条件向量，再从随机噪声开始一步步去噪成视频 latent，最后用 VAE 解码成真实视频帧。</p>
+          <div class="callout"><strong>一句话：</strong>提示词不是直接变成像素；提示词先经 T5 编码成语义条件，WanModel 在每个 denoising timestep 用 cross-attention 读取这个条件，逐步把随机 latent 修正成符合提示词的视频，最后 VAE 把 latent 解码成 mp4。</div>
+
+          <p>最典型的文本生成视频命令是：</p>
+          <pre><code>python generate.py \
+  --task t2v-A14B \
+  --size 1280*720 \
+  --ckpt_dir ./Wan2.2-T2V-A14B \
+  --prompt "Two anthropomorphic cats in comfy boxing gear fight on a stage"</code></pre>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>命令行收参数。</strong><code class="inline">generate.py</code> 读取 <code class="inline">--task</code>、<code class="inline">--size</code>、<code class="inline">--prompt</code>、<code class="inline">--ckpt_dir</code>、<code class="inline">--sample_steps</code>、<code class="inline">--sample_guide_scale</code> 等参数。<code class="inline">_validate_args()</code> 会补默认采样步数、shift、CFG scale、帧数。</div>
+            <div class="flow-step" data-step="2"><strong>可选扩写提示词。</strong>如果开 <code class="inline">--use_prompt_extend</code>，会用 DashScope 或本地 Qwen 把短 prompt 扩写成更细的影视描述。扩写失败则回退原 prompt。</div>
+            <div class="flow-step" data-step="3"><strong>创建任务 pipeline。</strong>对于 <code class="inline">t2v-A14B</code>，<code class="inline">generate.py</code> 创建 <code class="inline">wan.WanT2V</code>。这个对象加载 T5 文本编码器、VAE、high-noise model、low-noise model。</div>
+            <div class="flow-step" data-step="4"><strong>文本条件编码。</strong><code class="inline">WanT2V.generate()</code> 用 <code class="inline">self.text_encoder([input_prompt])</code> 编码正向提示词，同时用 negative prompt 编码 <code class="inline">context_null</code>，后面用于 classifier-free guidance。</div>
+            <div class="flow-step" data-step="5"><strong>初始化视频 latent 噪声。</strong>代码根据帧数、分辨率、VAE stride 计算 <code class="inline">target_shape</code>，再用 <code class="inline">torch.randn(...)</code> 生成初始噪声。这个噪声就是视频生成的起点。</div>
+            <div class="flow-step" data-step="6"><strong>设置采样时间步。</strong>根据 <code class="inline">sample_solver</code> 选择 <code class="inline">FlowUniPCMultistepScheduler</code> 或 <code class="inline">FlowDPMSolverMultistepScheduler</code>，生成一串 timesteps。</div>
+            <div class="flow-step" data-step="7"><strong>循环去噪。</strong>每个 timestep 都把当前 latent 送入 WanModel。模型分别跑有 prompt 条件的 <code class="inline">noise_pred_cond</code> 和无条件/负向条件的 <code class="inline">noise_pred_uncond</code>。</div>
+            <div class="flow-step" data-step="8"><strong>CFG 加强提示词控制。</strong>源码用 <code class="inline">noise_pred_uncond + guide_scale * (noise_pred_cond - noise_pred_uncond)</code>。直观理解：把“符合提示词的方向”放大，让视频更贴近 prompt。</div>
+            <div class="flow-step" data-step="9"><strong>更新 latent。</strong><code class="inline">sample_scheduler.step()</code> 根据模型预测结果和当前 timestep，把 latent 从更噪的状态推进到更干净、更像视频的状态。</div>
+            <div class="flow-step" data-step="10"><strong>VAE 解码并保存。</strong>采样结束后，<code class="inline">self.vae.decode(x0)</code> 把 latent 解码成视频帧；<code class="inline">save_video()</code> 把 tensor 转成 uint8 frame，用 imageio/libx264 写成 mp4。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>提示词到底控制了什么</h3>
+              <p>提示词经 T5 变成 <code class="inline">context</code>。在 <code class="inline">WanModel</code> 里，每个 Transformer block 都有 text cross-attention，视频 latent token 会 attend 到文本 token。这样“猫、拳击、舞台、灯光、动作”等语义会影响每一步去噪方向。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么同一句提示词可生成不同视频</h3>
+              <p>因为生成起点是随机噪声。<code class="inline">base_seed</code> 控制 <code class="inline">torch.Generator</code> 的随机种子；同 prompt + 同 seed + 同参数通常更可复现，不同 seed 会产生不同构图和运动。</p>
+            </article>
+            <article class="mini-card">
+              <h3>negative prompt 是干什么的</h3>
+              <p>配置里的 <code class="inline">sample_neg_prompt</code> 包含“低质量、模糊、畸形、多余手指、字幕”等负面描述。它参与无条件分支，CFG 会把结果从这些负面方向推开。</p>
+            </article>
+            <article class="mini-card">
+              <h3>采样步数影响什么</h3>
+              <p><code class="inline">sample_steps</code> 越多，去噪迭代越细，通常质量更稳但更慢。A14B 默认 40 步，TI2V-5B 默认 50 步，Animate 默认 20 步。</p>
+            </article>
+          </div>
+
+          <p>如果是图生视频、文图生视频、语音生视频，本质链路类似，只是条件更多：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>I2V：图片作为额外条件</h3>
+              <p><code class="inline">generate.py</code> 读取 <code class="inline">--image</code> 成 PIL image，然后创建 <code class="inline">WanI2V</code>。生成时会把输入图像编码成条件视频 latent，让输出视频延续原图主体、构图和风格。</p>
+            </article>
+            <article class="mini-card">
+              <h3>TI2V：一套模型兼容文生/图生</h3>
+              <p><code class="inline">WanTI2V.generate()</code> 判断 <code class="inline">img is not None</code>：有图走 i2v，没有图走 t2v。应用层表现就是同一个 5B 模型既能输入纯 prompt，也能输入 prompt + image。</p>
+            </article>
+            <article class="mini-card">
+              <h3>S2V：音频驱动视频</h3>
+              <p><code class="inline">WanS2V</code> 除了 T5 和 VAE，还加载 <code class="inline">AudioEncoder</code> / wav2vec。应用层输入 reference image + audio，生成视频后还会调用 <code class="inline">merge_video_audio()</code> 把音频合回 mp4。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Animate：预处理材料驱动</h3>
+              <p>Animate 不是只靠一句 prompt。它需要先预处理输入视频和人物参考图，得到 pose、face、mask、background 等材料，再用 <code class="inline">WanAnimate.generate()</code> 生成角色动画或人物替换视频。</p>
+            </article>
+          </div>
+
+          <pre><code>应用层可记成这 6 步：
+1. prompt / image / audio 进入 generate.py
+2. prompt 可选扩写
+3. T5 把 prompt 编成条件向量
+4. 初始化随机视频 latent
+5. WanModel 多步去噪，CFG 强化提示词方向
+6. VAE 解码 latent，save_video 写成 mp4</code></pre>
+
+          <div class="callout">最短总结：<strong>提示词生成视频 = 文本条件控制随机噪声逐步变成视频。</strong>用户看到的是“一句话生成 mp4”，源码里实际是 T5 编码 prompt、WanModel 按 timestep 多轮预测去噪方向、scheduler 更新 latent、VAE 解码视频帧。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Wan2.2/generate.py:345-454</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:203-378</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:346-449</code>、<code class="inline">/root/Wan2.2/wan/utils/utils.py:90-119</code>、<code class="inline">/root/Wan2.2/wan/textimage2video.py</code>、<code class="inline">/root/Wan2.2/wan/speech2video.py</code>、<code class="inline">/root/Wan2.2/wan/animate.py</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
