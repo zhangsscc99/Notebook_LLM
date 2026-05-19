@@ -950,7 +950,7 @@
         <details class="toc-group" id="joyAgentTocGroup" open>
           <summary>
             <span class="toc-group-title">京东Joy Agent</span>
-            <span class="toc-count">5 sections</span>
+            <span class="toc-count">6 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#joyagent-overview">01 · 概览介绍京东 JoyAgent-JDGenie</a>
@@ -998,6 +998,7 @@
             <a href="#wan22-video-latent">03 · 视频 latent 是什么</a>
             <a href="#wan22-vae-explanation">04 · VAE 是什么，在 Wan2.2 里负责什么</a>
             <a href="#wan22-architecture-vs-llm">05 · 视频生成模型架构是什么，对比 LLM 多了什么组件</a>
+            <a href="#wan22-temporal-consistency">06 · Wan 怎么控制不同帧之间的时序一致性</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6798,6 +6799,79 @@ index.search(query_vec, top_k)</code></pre>
 
           <div class="callout">最短总结：<strong>Wan2.2 不是“会输出视频的 LLM”，而是“文本条件控制的视频 latent 扩散系统”。</strong>Transformer 只是中间的主干网络；围绕它还必须有 VAE、scheduler、timestep、视频 patch、CFG 和多模态条件接口。</div>
           <div class="refs">参考源码：<code class="inline">/root/Wan2.2/wan/modules/model.py:294-520</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:253-368</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_t2v_A14B.py:19-37</code>、<code class="inline">/root/Wan2.2/wan/configs/wan_ti2v_5B.py:19-36</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_2.py:888-1051</code>、<code class="inline">/root/Wan2.2/generate.py:403-454</code>。</div>
+        </section>
+
+        <section class="section reveal" id="wan22-temporal-consistency">
+          <div class="section-header"><div class="index">WAN6</div><h2>Wan 怎么控制不同帧之间的时序一致性</h2></div>
+          <p>视频生成最容易出的问题是<strong>帧间闪烁、主体漂移、动作断裂、前后物体不一致</strong>。Wan2.2 控制时序一致性不是靠某个简单的“防闪烁开关”，而是从数据表示、网络结构、位置编码、注意力范围、VAE 编解码和采样过程一起做约束。</p>
+          <div class="callout"><strong>一句话：</strong>Wan2.2 不是逐帧单独生成图片再拼成视频，而是把整段视频 latent 当成一个 <code class="inline">F × H × W</code> 的时空张量一起建模；Transformer token 之间可以跨帧 self-attention，RoPE 明确告诉模型每个 token 属于哪一帧，VAE 用 3D causal conv 保持时序连续，scheduler 每一步整体更新整段 latent。</div>
+
+          <p>可以按 6 层理解它怎么压住时序一致性：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>第一层：不是逐帧生成，而是整段 latent 一起生成。</strong><code class="inline">WanT2V.generate()</code> 初始化的 <code class="inline">target_shape</code> 是 <code class="inline">[C, F_latent, H_latent, W_latent]</code>。也就是说，模型一开始就拿到整段视频 latent，而不是第 1 帧生成完再独立生成第 2 帧。</div>
+            <div class="flow-step" data-step="2"><strong>第二层：3D patch embedding 保留时间维。</strong><code class="inline">WanModel</code> 用 <code class="inline">nn.Conv3d</code> 做 patch embedding，输入是视频 latent 的 C/F/H/W。它切出来的是时空 patch token，不是单张图片 token。</div>
+            <div class="flow-step" data-step="3"><strong>第三层：self-attention 跨帧混合信息。</strong><code class="inline">WanSelfAttention</code> 对 patch token 做 attention。默认配置 <code class="inline">window_size=(-1,-1)</code>，表示不是滑窗局部注意力；同一个视频序列里的不同帧 token 可以互相影响，模型能同时看前后帧来决定当前帧怎么动。</div>
+            <div class="flow-step" data-step="4"><strong>第四层：视频 RoPE 标注帧、高、宽三维位置。</strong><code class="inline">rope_apply()</code> 把频率拆给时间 F、高 H、宽 W 三个维度。这样模型不只知道“这是第几个 token”，还知道“这是第几帧、哪个空间位置”。</div>
+            <div class="flow-step" data-step="5"><strong>第五层：VAE 不是纯 2D 图片解码器。</strong><code class="inline">vae2_1.py</code> / <code class="inline">vae2_2.py</code> 里大量使用 <code class="inline">CausalConv3d</code>、<code class="inline">downsample3d</code>、<code class="inline">upsample3d</code>。VAE decode 时会在时间维做卷积/上采样，让相邻帧共享局部时序信息。</div>
+            <div class="flow-step" data-step="6"><strong>第六层：每个 denoising step 整体更新全视频。</strong>采样循环里，scheduler 不是更新某一帧，而是用模型预测结果整体更新 <code class="inline">latents[0]</code>。所以主体、背景、运动轨迹在每一步都作为一个全局视频状态被共同修正。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么“整体 latent”很关键</h3>
+              <p>如果逐帧生成，每一帧都有自己的随机性，人物脸、衣服纹理、背景位置容易漂。Wan2.2 的随机噪声是整段视频 latent，后续每一步也是整段视频一起去噪；这让模型能学“一个主体在连续时间里的变化”，而不是学“很多独立图片”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>self-attention 怎么帮时序一致</h3>
+              <p>attention 让第 t 帧的 token 可以读取第 t-1、t+1 或更远帧的 token。这样模型在预测当前 token 时，不只看当前局部纹理，还能参考前后帧的主体位置、姿态、背景结构，从而减少跳变。</p>
+            </article>
+            <article class="mini-card">
+              <h3>RoPE 为什么重要</h3>
+              <p>只有 attention 还不够，模型还必须知道 token 的时空坐标。<code class="inline">rope_apply()</code> 根据 <code class="inline">grid_sizes=(F,H,W)</code> 构造时间、高、宽三套旋转位置编码，给跨帧 attention 提供“时间距离”和“空间位置”的坐标感。</p>
+            </article>
+            <article class="mini-card">
+              <h3>VAE 对一致性有什么影响</h3>
+              <p>如果 VAE 按单帧独立 decode，即使 latent 稳，像素层也可能闪。Wan 的视频 VAE 用 3D causal conv 和时间上/下采样，在像素重建时也利用邻近帧信息，降低解码阶段的帧间不连续。</p>
+            </article>
+          </div>
+
+          <p>源码链路可以这样对上：</p>
+          <pre><code>1. text2video.py
+   target_shape = [z_dim, F_latent, H_latent, W_latent]
+   noise = torch.randn(target_shape)
+
+2. model.py / WanModel.forward()
+   patch_embedding = Conv3d(...)
+   grid_sizes = [F_patch, H_patch, W_patch]
+   latent video -> flatten 成时空 token 序列
+
+3. model.py / rope_apply()
+   对 F/H/W 三个维度分别加 RoPE
+
+4. model.py / WanAttentionBlock
+   self-attention：视频 token 之间建模
+   cross-attention：视频 token 读取文本条件
+
+5. text2video.py 采样循环
+   每个 timestep 整体更新整段 latents[0]
+
+6. vae2_1.py / vae2_2.py
+   CausalConv3d + temporal downsample/upsample
+   clean latent -> 连续视频帧</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>和“图片模型逐帧生成”本质差异</h3>
+              <p>图片模型逐帧生成通常只能靠 prompt、seed、上一帧条件或后处理来维持一致性。Wan2.2 这种视频 DiT 是原生视频建模：训练目标和网络输入就是一段视频 latent，所以时序一致性是模型能力的一部分。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它能不能保证绝对不闪</h3>
+              <p>不能。长视频、复杂运动、遮挡、人物细节、文字和手部仍可能漂移。原因是 latent 压缩有损、attention 长序列建模有限、采样有随机性，且 prompt 本身可能约束不足。工程上通常还会通过更强条件、参考图、pose、低 guide scale 调参、更多步数或后处理继续改善。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短记忆：<strong>Wan 的时序一致性 = 整段视频 latent 一起去噪 + 3D patch + 跨帧 attention + F/H/W RoPE + 视频 VAE 3D 卷积。</strong>它不是把 81 张图片分别画好再拼接，而是在一个统一的时空 latent 里生成“会动的一段视频”。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Wan2.2/wan/text2video.py:253-288</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:335-360</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:38-66</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:101-150</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:183-258</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:377-496</code>、<code class="inline">/root/Wan2.2/wan/modules/attention.py:24-49</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_2.py:17-169</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_1.py:17-99</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
