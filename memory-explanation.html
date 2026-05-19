@@ -987,6 +987,15 @@
             <a href="#vrag-embedding-reranker-models">08 · VRAG 的 embedding 模型和 reranker 模型用的是什么</a>
           </div>
         </details>
+        <details class="toc-group" id="wan22TocGroup" open>
+          <summary>
+            <span class="toc-group-title">Wan2.2 视频生成</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#wan22-project-overview">01 · 项目概览</a>
+          </div>
+        </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
           <summary>
             <span class="toc-group-title">算法查漏补缺</span>
@@ -6468,6 +6477,86 @@ index.search(query_vec, top_k)</code></pre>
 
           <div class="callout"><strong>reranker 结论：</strong>当前仓库没有看到独立的 reranker/cross-encoder 重排模块，也没有 search 后二阶段 rerank。VimRAG 的 <code class="inline">priority_score</code> 和 memory energy 是 agent 记忆筛选逻辑，不是传统检索 reranker。VRAG 的检索结果排序主要就是 embedding 相似度排序。</div>
           <div class="refs">参考：<code class="inline">/root/VRAG/README.md:133-136</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py:11-44</code>、<code class="inline">/root/VRAG/search_engine/search_engine_api.py:7-9</code>、<code class="inline">/root/VRAG/search_engine/models/GVE/models.py:133-184</code>、<code class="inline">/root/VRAG/search_engine/models/GVE/models.py:209-255</code>、<code class="inline">/root/VRAG/search_engine/models/Qwen3_VL_Embedding/qwen3_vl_embedding.py:363-393</code>。</div>
+        </section>
+
+        <section class="section reveal" id="wan22-project-overview">
+          <div class="section-header"><div class="index">WAN1</div><h2>Wan2.2 项目概览</h2></div>
+          <p><strong>Wan2.2</strong> 是 Wan-Video 开源的大规模视频生成模型工程仓库，源码已 clone 到服务器：<code class="inline">/root/Wan2.2</code>。它覆盖文本生成视频、图像生成视频、文本+图像统一生成视频、语音驱动视频、人物动画/替换等多条视频生成任务线。</p>
+          <div class="callout"><strong>一句话：</strong>Wan2.2 是一个开源视频扩散模型推理框架：用 T5 编码文本条件，用 VAE 在视频 latent 空间压缩/解码，用 DiT/WanModel 做 flow-matching denoising；A14B 系列用高噪声/低噪声两个 expert 做 MoE 分段去噪，TI2V-5B 用高压缩 VAE 降低 720P 推理成本。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 仓库支持哪些模型/任务</h3>
+              <p><code class="inline">README.md</code> 和 <code class="inline">wan/configs/__init__.py</code> 里列出的核心任务包括：<code class="inline">t2v-A14B</code> 文本到视频、<code class="inline">i2v-A14B</code> 图像到视频、<code class="inline">ti2v-5B</code> 文本/图像统一到视频、<code class="inline">s2v-14B</code> 语音到视频、<code class="inline">animate-14B</code> 角色动画和替换。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. A14B 的核心：分段 MoE 去噪</h3>
+              <p>T2V/I2V A14B 配置里有 <code class="inline">low_noise_checkpoint</code> 和 <code class="inline">high_noise_checkpoint</code>。源码 <code class="inline">WanT2V._prepare_model_for_timestep()</code> 会根据 timestep 和 <code class="inline">boundary</code> 选择高噪声 expert 或低噪声 expert。</p>
+              <p>这不是 token 级 router 的 MoE，而是按扩散去噪阶段切 expert：早期高噪声阶段管整体布局，后期低噪声阶段管细节 refinement。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 5B TI2V 的核心：高压缩 VAE</h3>
+              <p><code class="inline">wan_ti2v_5B.py</code> 使用 <code class="inline">Wan2.2_VAE.pth</code>，<code class="inline">vae_stride=(4,16,16)</code>，默认 <code class="inline">sample_fps=24</code>、<code class="inline">frame_num=121</code>。README 也强调 TI2V-5B 支持 720P@24fps，并可在 4090 级别消费卡上运行。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 入口：generate.py</h3>
+              <p><code class="inline">generate.py</code> 是统一命令行入口。它解析 <code class="inline">--task</code>、<code class="inline">--size</code>、<code class="inline">--ckpt_dir</code>、<code class="inline">--prompt</code>、<code class="inline">--image</code>、<code class="inline">--audio</code>、采样步数、CFG scale、FSDP/Ulysses 等参数，然后按任务创建对应 pipeline。</p>
+            </article>
+          </div>
+
+          <p>从源码看，一次生成大致是下面这条链路：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>参数校验。</strong><code class="inline">_validate_args()</code> 检查任务是否在 <code class="inline">WAN_CONFIGS</code> 中，填充默认 prompt、image、audio、sample_steps、sample_shift、guide_scale、frame_num。</div>
+            <div class="flow-step" data-step="2"><strong>可选 prompt extension。</strong>如果启用 <code class="inline">--use_prompt_extend</code>，会用 DashScope 或本地 Qwen 扩写 prompt；T2V 用文本 Qwen，I2V 可用 Qwen-VL。</div>
+            <div class="flow-step" data-step="3"><strong>创建 pipeline。</strong>根据 task 创建 <code class="inline">WanT2V</code>、<code class="inline">WanI2V</code>、<code class="inline">WanTI2V</code>、<code class="inline">WanS2V</code> 或 <code class="inline">WanAnimate</code>。</div>
+            <div class="flow-step" data-step="4"><strong>条件编码。</strong>T2V/TI2V/I2V 都会用 <code class="inline">T5EncoderModel</code> 编码正向 prompt 和 negative prompt；S2V 额外加载 <code class="inline">AudioEncoder</code> / wav2vec；Animate 额外用 CLIP 和预处理过的人体/pose/face/mask 条件。</div>
+            <div class="flow-step" data-step="5"><strong>latent 初始化。</strong>根据目标分辨率、帧数、VAE stride 和 patch size 计算 latent shape / seq_len，然后用随机噪声初始化视频 latent。</div>
+            <div class="flow-step" data-step="6"><strong>flow matching 采样。</strong>使用 <code class="inline">FlowUniPCMultistepScheduler</code> 或 <code class="inline">FlowDPMSolverMultistepScheduler</code>，逐 timestep 调 WanModel 预测噪声/速度，并做 classifier-free guidance。</div>
+            <div class="flow-step" data-step="7"><strong>MoE expert 切换。</strong>A14B 在每个 timestep 根据 boundary 选择 high-noise 或 low-noise 模型；guide scale 也可按高/低噪声阶段分别设置。</div>
+            <div class="flow-step" data-step="8"><strong>VAE 解码保存。</strong>采样完成后用 VAE decode latent 成视频张量，<code class="inline">save_video()</code> 写成 mp4；S2V 还会把生成视频和输入/合成音频 merge。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>WanModel 是什么结构</h3>
+              <p><code class="inline">wan/modules/model.py</code> 里的 <code class="inline">WanModel</code> 是视频 DiT backbone。它用 <code class="inline">Conv3d</code> 做 3D patch embedding，把 latent video 切成时空 patch token；用 sinusoidal time embedding 表示 diffusion timestep；用 Transformer blocks 做 self-attention 和 text cross-attention。</p>
+            </article>
+            <article class="mini-card">
+              <h3>时空位置怎么建模</h3>
+              <p>源码有 <code class="inline">rope_params()</code> 和 <code class="inline">rope_apply()</code>，把 RoPE 分到帧、高、宽三个维度上。<code class="inline">grid_sizes</code> 保存每个样本的 latent 时空网格，attention 时按视频 token 的 F/H/W 位置加旋转位置编码。</p>
+            </article>
+            <article class="mini-card">
+              <h3>多卡推理怎么做</h3>
+              <p>仓库支持 <code class="inline">--t5_fsdp</code>、<code class="inline">--dit_fsdp</code> 和 <code class="inline">--ulysses_size</code>。FSDP 用于切 T5/DiT 参数；Ulysses/sequence parallel 会替换 block self-attn forward 和 model forward，降低长视频 token 序列的显存压力。</p>
+            </article>
+            <article class="mini-card">
+              <h3>显存优化怎么做</h3>
+              <p>命令行提供 <code class="inline">--offload_model</code>、<code class="inline">--convert_model_dtype</code>、<code class="inline">--t5_cpu</code>。A14B 的 <code class="inline">_prepare_model_for_timestep()</code> 还会在 offload 模式下把当前不用的 expert 放回 CPU，只把当前 timestep 需要的 expert 放到 GPU。</p>
+            </article>
+          </div>
+
+          <p>各任务可以这样理解：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>T2V-A14B</h3>
+              <p>文本到视频 MoE 模型，支持 480P 和 720P。配置：40 层、hidden dim 5120、40 heads、Wan2.1 VAE stride <code class="inline">(4,8,8)</code>、默认 81 帧、16fps。</p>
+            </article>
+            <article class="mini-card">
+              <h3>I2V-A14B</h3>
+              <p>图像到视频 MoE 模型。输入图像会作为条件，输出视频的 aspect ratio 跟随输入图像；同样使用 high/low noise expert。</p>
+            </article>
+            <article class="mini-card">
+              <h3>TI2V-5B</h3>
+              <p>统一 T2V/I2V 的 5B dense 模型。是否传 <code class="inline">--image</code> 决定走 image-to-video，否则走 text-to-video；重点是高压缩 Wan2.2 VAE 和 720P@24fps。</p>
+            </article>
+            <article class="mini-card">
+              <h3>S2V / Animate</h3>
+              <p>S2V 用参考图、音频和可选 pose video 生成音频同步视频，可集成 CosyVoice TTS。Animate 用预处理后的 pose/face/background/mask 等材料做角色动画或人物替换。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>Wan2.2 = 视频生成大模型的完整推理工程。</strong>它的关键不是一个单文件 demo，而是“配置系统 + 多任务 pipeline + T5 条件编码 + VAE latent 压缩 + WanModel/DiT denoising + MoE expert 切换 + FSDP/Ulysses/CPU offload”的组合。</div>
+          <div class="refs">本地源码：<code class="inline">/root/Wan2.2</code>。参考文件：<code class="inline">README.md</code>、<code class="inline">INSTALL.md</code>、<code class="inline">generate.py</code>、<code class="inline">wan/configs/__init__.py</code>、<code class="inline">wan/configs/wan_t2v_A14B.py</code>、<code class="inline">wan/configs/wan_i2v_A14B.py</code>、<code class="inline">wan/configs/wan_ti2v_5B.py</code>、<code class="inline">wan/configs/wan_s2v_14B.py</code>、<code class="inline">wan/configs/wan_animate_14B.py</code>、<code class="inline">wan/text2video.py</code>、<code class="inline">wan/image2video.py</code>、<code class="inline">wan/textimage2video.py</code>、<code class="inline">wan/speech2video.py</code>、<code class="inline">wan/animate.py</code>、<code class="inline">wan/modules/model.py</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
