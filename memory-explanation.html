@@ -974,12 +974,17 @@
         <details class="toc-group" id="vragTocGroup" open>
           <summary>
             <span class="toc-group-title">Alibaba VRAG</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">8 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#vrag-project-overview">01 · 项目概览</a>
             <a href="#vrag-text-rag-chunking-methods">02 · 文本 RAG 的切块一般有几种方法</a>
             <a href="#vrag-visual-rag-chunking-cropping">03 · 视觉 RAG 的切块怎么切，检索的时候怎么裁剪</a>
+            <a href="#vrag-retrieval-principle">04 · VRAG 用的是什么检索原理</a>
+            <a href="#vrag-recall-topk">05 · VRAG 检索召回几个，topK 在哪里配置</a>
+            <a href="#vrag-vector-database">06 · VRAG 用的向量数据库是什么</a>
+            <a href="#vrag-cross-modal-search">07 · VRAG 可以文搜图、图搜文、图搜图吗</a>
+            <a href="#vrag-embedding-reranker-models">08 · VRAG 的 embedding 模型和 reranker 模型用的是什么</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6319,6 +6324,150 @@ crop_region = self.image_raw[-1].crop(crop_region_bbox)</code></pre>
 
           <div class="callout">最短总结：<strong>视觉 RAG 的第一层 chunk 是可检索视觉单元，第二层 chunk 是推理时动态裁剪出来的局部视野。</strong>在 VRAG 里，PDF 先切成页图，视频先切成固定时长片段，图片整图入库；检索后模型用 bbox 指挥裁剪，实现 coarse-to-fine 的视觉证据获取。</div>
           <div class="refs">参考源码：<code class="inline">/root/VRAG/search_engine/corpus/pdf2images.py</code>、<code class="inline">/root/VRAG/search_engine/corpus/splitVideo.sh</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py</code>、<code class="inline">/root/VRAG/search_engine/search_engine_api.py</code>、<code class="inline">/root/VRAG/demo/vrag_agent.py</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="vrag-retrieval-principle">
+          <div class="section-header"><div class="index">VRAG4</div><h2>VRAG 用的是什么检索原理</h2></div>
+          <p>从源码看，VRAG 的检索不是 BM25，也不是 LLM 直接读全量图片，而是<strong>多模态 dense retrieval</strong>：把文本、图片、视频片段编码到同一个向量空间，然后用 FAISS 做向量相似度检索。</p>
+          <div class="callout"><strong>一句话：</strong>VRAG 检索原理 = 多模态 embedding 模型把 query 和视觉/文本语料都变成向量，FAISS 用内积相似度找 topK，agent 再把召回的图片/视频/文本喂给 VLM 继续推理。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>建库。</strong><code class="inline">SearchEngine.build_index()</code> 扫描 corpus。文本记录保存 <code class="inline">content</code>，图片保存 <code class="inline">file_path</code>，视频保存 <code class="inline">file_path</code> 和抽帧参数。</div>
+            <div class="flow-step" data-step="2"><strong>编码。</strong>如果用 GVE，就通过 <code class="inline">VLProcessor</code> 把 text/image/video 包成 Qwen2.5-VL 风格消息，再 <code class="inline">model.encode()</code>；如果用 Qwen3-VL Embedding，就调用 <code class="inline">Qwen3VLEmbedder.process()</code>。</div>
+            <div class="flow-step" data-step="3"><strong>归一化。</strong>GVE 的 <code class="inline">AutoModelForSentenceEmbedding.encode()</code> 默认会 <code class="inline">F.normalize</code>；Qwen3-VL Embedding 的 <code class="inline">process(..., normalize=True)</code> 也会 L2 normalize。</div>
+            <div class="flow-step" data-step="4"><strong>入库。</strong>向量写入 <code class="inline">faiss.IndexFlatIP</code>。IP 是 inner product，向量归一化后基本等价于 cosine similarity。</div>
+            <div class="flow-step" data-step="5"><strong>查询。</strong><code class="inline">SearchEngine.search()</code> 把 query 编成向量，然后调用 <code class="inline">_index.search(query_vectors.astype('float32'), top_k)</code> 返回分数和索引位置。</div>
+          </div>
+
+          <p>所以它的 ranking 目前是<strong>纯向量相似度排序</strong>：FAISS 返回的 <code class="inline">similarities</code> 和 <code class="inline">indices</code> 直接映射回 <code class="inline">file_data_list</code>，形成 <code class="inline">score / indice / data</code>。</p>
+          <div class="refs">参考：<code class="inline">/root/VRAG/search_engine/search_engine.py:90-180</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py:281-332</code>、<code class="inline">/root/VRAG/search_engine/models/GVE/models.py:133-184</code>、<code class="inline">/root/VRAG/search_engine/models/Qwen3_VL_Embedding/qwen3_vl_embedding.py:372-393</code>。</div>
+        </section>
+
+        <section class="section reveal" id="vrag-recall-topk">
+          <div class="section-header"><div class="index">VRAG5</div><h2>VRAG 检索召回几个，topK 在哪里配置</h2></div>
+          <p>默认召回数量是 <strong>topK=3</strong>，但不同入口配置位置不一样。</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>SearchEngine 默认</h3>
+              <p><code class="inline">SearchEngine.search(self, queries, top_k=3)</code> 默认 topK 是 3。代码还会做 <code class="inline">top_k = min(top_k, len(file_data_list))</code>，防止请求数量超过索引长度。</p>
+            </article>
+            <article class="mini-card">
+              <h3>FastAPI 默认</h3>
+              <p><code class="inline">search_engine_api.py</code> 从请求 body 读取 <code class="inline">top_k = body.get("top_k", 3)</code>，所以 API 不传时也是 3。</p>
+            </article>
+            <article class="mini-card">
+              <h3>VRAG demo</h3>
+              <p><code class="inline">demo/vrag_agent.py</code> 的 <code class="inline">search()</code> 写死请求 <code class="inline">{"queries": query, "top_k": 3}</code>。也就是说经典 VRAG demo 每次 search 默认拿 3 张候选图。</p>
+            </article>
+            <article class="mini-card">
+              <h3>VimRAG demo</h3>
+              <p><code class="inline">VimRAG.__init__</code> 的 <code class="inline">search_top_k=3</code>，Streamlit UI 里 Search Top-K slider 范围是 1 到 10，默认 3。注意 VimRAG 还有一个 memory top_k=5，用于多模态记忆回填，不是检索召回 topK。</p>
+            </article>
+          </div>
+          <div class="callout">结论：<strong>VRAG 当前默认检索召回 3 个候选。</strong>如果要改，API 层可以传 <code class="inline">top_k</code>，VimRAG UI 可调；经典 <code class="inline">vrag_agent.py</code> 需要改源码里的 <code class="inline">top_k: 3</code>。</div>
+          <div class="refs">参考：<code class="inline">/root/VRAG/search_engine/search_engine.py:281</code>、<code class="inline">/root/VRAG/search_engine/search_engine_api.py:19</code>、<code class="inline">/root/VRAG/demo/vrag_agent.py:59-65</code>、<code class="inline">/root/VRAG/demo/vimrag_agent.py:30</code>、<code class="inline">/root/VRAG/demo/vimrag_app.py:759-764</code>。</div>
+        </section>
+
+        <section class="section reveal" id="vrag-vector-database">
+          <div class="section-header"><div class="index">VRAG6</div><h2>VRAG 用的向量数据库是什么</h2></div>
+          <p>源码里没有接 Milvus、Qdrant、Weaviate、Elasticsearch dense vector 这类独立向量数据库。它用的是<strong>本地 FAISS 索引</strong>。</p>
+          <div class="callout"><strong>准确说：</strong>VRAG 用 FAISS 做向量索引，不是一个带服务端、权限、多租户、过滤表达式的完整向量数据库。它把 FAISS index 文件和 metadata JSONL 文件放在本地磁盘。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>索引类型</h3>
+              <p><code class="inline">SearchEngine.build_index()</code> 新建索引时用 <code class="inline">faiss.IndexFlatIP(self.dimension)</code>。Flat 表示不做 IVF/HNSW/PQ 压缩近似，IP 表示 inner product 相似度。</p>
+            </article>
+            <article class="mini-card">
+              <h3>索引文件</h3>
+              <p>索引保存为 <code class="inline">{model_name}_faiss_index.bin</code>，通过 <code class="inline">faiss.write_index()</code> 写入，通过 <code class="inline">faiss.read_index()</code> 加载。</p>
+            </article>
+            <article class="mini-card">
+              <h3>元数据文件</h3>
+              <p>每条向量对应的文件信息写入 <code class="inline">{model_name}_file_data_list.jsonl</code>，包含 <code class="inline">type</code>、<code class="inline">file_path</code>、文本 <code class="inline">content</code> 等。</p>
+            </article>
+            <article class="mini-card">
+              <h3>多索引合并</h3>
+              <p><code class="inline">load_multi_index_corpus_together()</code> 可以加载多个 index 目录，用 <code class="inline">self.index.merge_from(...)</code> 合并 FAISS index，同时 extend metadata。</p>
+            </article>
+          </div>
+
+          <p>所以它更像一个轻量本地检索引擎：FAISS 负责向量近邻搜索，FastAPI 负责把它包装成 <code class="inline">/search</code> 服务。</p>
+          <div class="refs">参考：<code class="inline">/root/VRAG/search_engine/search_engine.py:52-88</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py:90-105</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py:256-276</code>。</div>
+        </section>
+
+        <section class="section reveal" id="vrag-cross-modal-search">
+          <div class="section-header"><div class="index">VRAG7</div><h2>VRAG 可以文搜图、图搜文、图搜图吗</h2></div>
+          <p>要分清<strong>模型能力</strong>和<strong>当前 API 实现</strong>。VRAG 使用的多模态 embedding 模型理论上可以把文本、图片、视频放进同一向量空间；但当前 <code class="inline">SearchEngine.search()</code> 暴露出来的查询入口主要是<strong>文本 query</strong>。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>文搜图：支持</h3>
+              <p>这是当前 demo 的主路径。用户问题或模型生成的搜索词是文本，<code class="inline">search()</code> 把文本 query 编成向量；如果 corpus 里是图片，就能返回图片记录。VRAG demo 正是用文本 <code class="inline">&lt;search&gt;</code> 召回图片。</p>
+            </article>
+            <article class="mini-card">
+              <h3>文搜视频 / 文搜文本：也支持</h3>
+              <p><code class="inline">build_index()</code> 能把 <code class="inline">.mp4</code> 作为 <code class="inline">type='video'</code>，把 <code class="inline">.txt/.md/.json</code> 作为 <code class="inline">type='text'</code>。只要这些数据已入库，文本 query 可以搜到对应 modality 的记录。</p>
+            </article>
+            <article class="mini-card">
+              <h3>图搜图：模型层可做，当前 API 没直接开放</h3>
+              <p><code class="inline">Qwen3VLEmbedder.process()</code> 支持 <code class="inline">image</code> 输入，GVE 的 processor 也能处理 image/video。但当前 <code class="inline">SearchEngine.search()</code> 对 Qwen3-VL 分支写的是 <code class="inline">query_inputs = [{'text': query}]</code>，对 GVE 分支也把 query 包成 text content。</p>
+            </article>
+            <article class="mini-card">
+              <h3>图搜文：同理，当前未封装</h3>
+              <p>如果你改造 search 接口，让它接收 image path/base64 并用同一 embedding 模型编码成 query vector，那么可以在同一个 FAISS index 里搜文本/图片/视频记录。但仓库当前 FastAPI <code class="inline">/search</code> 只读取 <code class="inline">queries</code> 字符串列表。</p>
+            </article>
+          </div>
+
+          <pre><code>当前源码的查询路径：
+POST /search {"queries": ["文本查询"], "top_k": 3}
+  -> SearchEngine.search(queries, top_k)
+  -> query_inputs = [{'text': query}]
+  -> FAISS search
+  -> 返回图片/文本/视频 metadata
+
+如果要图搜图/图搜文，需要新增类似：
+query_vec = embedder.process([{'image': image_path}], normalize=True)
+index.search(query_vec, top_k)</code></pre>
+
+          <div class="callout">结论：<strong>当前开箱即用是文搜多模态，尤其是文搜图。</strong>图搜图、图搜文在 embedding 模型层面有基础，但当前 search API 和 demo 没把 image query 作为入口封装出来。</div>
+          <div class="refs">参考：<code class="inline">/root/VRAG/search_engine/search_engine.py:128-144</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py:281-330</code>、<code class="inline">/root/VRAG/search_engine/models/Qwen3_VL_Embedding/qwen3_vl_embedding.py:220-326</code>、<code class="inline">/root/VRAG/search_engine/search_engine_api.py:14-22</code>。</div>
+        </section>
+
+        <section class="section reveal" id="vrag-embedding-reranker-models">
+          <div class="section-header"><div class="index">VRAG8</div><h2>VRAG 的 embedding 模型和 reranker 模型用的是什么</h2></div>
+          <p>从当前源码看，VRAG 明确实现了 embedding 检索模型接入，但<strong>没有实现独立 reranker 模型</strong>。排序主要靠 FAISS inner product 分数。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>embedding：默认 Qwen3-VL-Embedding-2B</h3>
+              <p><code class="inline">search_engine/search_engine_api.py</code> 里写死 <code class="inline">model_path = "Qwen3-VL-Embedding-2B"</code>。<code class="inline">search_engine/search_engine.py</code> 的 main 示例也初始化 <code class="inline">SearchEngine("Qwen3-VL-Embedding-2B")</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>embedding：可选 GVE-3B / GVE-7B</h3>
+              <p>README 支持 <code class="inline">Alibaba-NLP/GVE-3B</code>，维度 2048；<code class="inline">Alibaba-NLP/GVE-7B</code>，维度 3584。源码里 GVE 基于 Qwen2.5-VL embedding，支持 text/image/video 编码。</p>
+            </article>
+            <article class="mini-card">
+              <h3>embedding：可选 Qwen3-VL-Embedding-2B / 8B</h3>
+              <p>README 里列出 <code class="inline">Qwen/Qwen3-VL-Embedding-2B</code> 维度 2048，<code class="inline">Qwen/Qwen3-VL-Embedding-8B</code> 维度 4096。源码按名字里的 <code class="inline">2B/8B</code> 设置维度。</p>
+            </article>
+            <article class="mini-card">
+              <h3>文本 baseline：bge-m3</h3>
+              <p><code class="inline">SearchEngine</code> 也支持 <code class="inline">bge-m3</code> 分支，用 <code class="inline">SentenceTransformer</code>，维度 1024。但这是文本 embedding 路线，不是 VRAG 视觉检索的主线。</p>
+            </article>
+          </div>
+
+          <p>GVE 和 Qwen3-VL Embedding 的向量生成方式也能从源码看出来：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1">GVE：<code class="inline">AutoModelForSentenceEmbedding.encode()</code> 取最后一层 hidden state，支持 <code class="inline">last</code> 或 <code class="inline">mean</code> pooling，默认 normalize。</div>
+            <div class="flow-step" data-step="2">GVE 训练侧：<code class="inline">AutoModelForSentenceEmbeddingTriplet.forward()</code> 会编码 query、positive、negative，用 cross entropy 做对比学习；还计算 t2v 和 v2t 两个方向的 loss。</div>
+            <div class="flow-step" data-step="3">Qwen3-VL Embedding：<code class="inline">Qwen3VLEmbedder.process()</code> 把 text/image/video 包成 conversation，前向后取 attention mask 最后一个有效 token 的 hidden state，再 L2 normalize。</div>
+            <div class="flow-step" data-step="4">检索排序：这些 embedding 向量进入 <code class="inline">faiss.IndexFlatIP</code>，search 返回 inner product 分数。</div>
+          </div>
+
+          <div class="callout"><strong>reranker 结论：</strong>当前仓库没有看到独立的 reranker/cross-encoder 重排模块，也没有 search 后二阶段 rerank。VimRAG 的 <code class="inline">priority_score</code> 和 memory energy 是 agent 记忆筛选逻辑，不是传统检索 reranker。VRAG 的检索结果排序主要就是 embedding 相似度排序。</div>
+          <div class="refs">参考：<code class="inline">/root/VRAG/README.md:133-136</code>、<code class="inline">/root/VRAG/search_engine/search_engine.py:11-44</code>、<code class="inline">/root/VRAG/search_engine/search_engine_api.py:7-9</code>、<code class="inline">/root/VRAG/search_engine/models/GVE/models.py:133-184</code>、<code class="inline">/root/VRAG/search_engine/models/GVE/models.py:209-255</code>、<code class="inline">/root/VRAG/search_engine/models/Qwen3_VL_Embedding/qwen3_vl_embedding.py:363-393</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
