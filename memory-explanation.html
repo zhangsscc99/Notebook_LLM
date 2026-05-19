@@ -990,7 +990,7 @@
         <details class="toc-group" id="wan22TocGroup" open>
           <summary>
             <span class="toc-group-title">Wan2.2 视频生成</span>
-            <span class="toc-count">5 sections</span>
+            <span class="toc-count">6 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#wan22-project-overview">01 · 项目概览</a>
@@ -999,6 +999,15 @@
             <a href="#wan22-vae-explanation">04 · VAE 是什么，在 Wan2.2 里负责什么</a>
             <a href="#wan22-architecture-vs-llm">05 · 视频生成模型架构是什么，对比 LLM 多了什么组件</a>
             <a href="#wan22-temporal-consistency">06 · Wan 怎么控制不同帧之间的时序一致性</a>
+          </div>
+        </details>
+        <details class="toc-group" id="hunyuan3dTocGroup" open>
+          <summary>
+            <span class="toc-group-title">混元3D</span>
+            <span class="toc-count">1 section</span>
+          </summary>
+          <div class="toc-group-links">
+            <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6872,6 +6881,87 @@ index.search(query_vec, top_k)</code></pre>
 
           <div class="callout">最短记忆：<strong>Wan 的时序一致性 = 整段视频 latent 一起去噪 + 3D patch + 跨帧 attention + F/H/W RoPE + 视频 VAE 3D 卷积。</strong>它不是把 81 张图片分别画好再拼接，而是在一个统一的时空 latent 里生成“会动的一段视频”。</div>
           <div class="refs">参考源码：<code class="inline">/root/Wan2.2/wan/text2video.py:253-288</code>、<code class="inline">/root/Wan2.2/wan/text2video.py:335-360</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:38-66</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:101-150</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:183-258</code>、<code class="inline">/root/Wan2.2/wan/modules/model.py:377-496</code>、<code class="inline">/root/Wan2.2/wan/modules/attention.py:24-49</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_2.py:17-169</code>、<code class="inline">/root/Wan2.2/wan/modules/vae2_1.py:17-99</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-project-overview">
+          <div class="section-header"><div class="index">HY3D1</div><h2>概览介绍 Hunyuan3D-2 项目</h2></div>
+          <p><strong>Hunyuan3D-2</strong> 是腾讯混元开源的 3D 资产生成工程仓库，源码已 clone 到服务器：<code class="inline">/root/Hunyuan3D-2</code>。它的目标不是生成 2D 图片或视频，而是从输入图片生成可导出的 3D mesh，并可继续生成纹理，最后输出 <code class="inline">glb</code> / <code class="inline">obj</code> 这类 3D 资产。</p>
+          <div class="callout"><strong>一句话：</strong>混元 3D 是一个“两阶段 3D 生成系统”：第一阶段用 <code class="inline">Hunyuan3D-DiT</code> 做 image-to-shape，生成裸 mesh；第二阶段用 <code class="inline">Hunyuan3D-Paint</code> 做 texture synthesis，把参考图的外观烘焙到 mesh 的 UV 纹理上。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 这个项目解决什么问题</h3>
+              <p>输入一张物体图片，比如玩具、角色、商品图，项目可以生成一个 3D 模型。最小 demo 里就是读取 <code class="inline">assets/demo.png</code>，先跑 shape generation 得到 mesh，再跑 texture generation，最后 <code class="inline">mesh.export('demo.glb')</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 两个核心模型</h3>
+              <p>README 明确把系统拆成两个基础组件：<strong>Hunyuan3D-DiT</strong> 是形状生成模型，负责几何结构；<strong>Hunyuan3D-Paint</strong> 是纹理生成模型，负责高质量贴图。这样把“形状”和“材质/颜色”两个难题解耦。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 不是文本直接生成 3D</h3>
+              <p>仓库主流程是 image-to-3D。也有 <code class="inline">hy3dgen/text2image.py</code>，可先把文本变成图片，再把图片作为 3D 生成条件。真正的 3D 形状生成入口仍然是图片条件。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 主要输出是什么</h3>
+              <p>形状阶段输出 <code class="inline">trimesh.Trimesh</code> 或 latent；纹理阶段输出带 UV/贴图的 mesh。最终可以导出 <code class="inline">.glb</code>，直接进 Blender、网页 3D viewer、游戏资产流程或后续 3D 编辑工具。</p>
+            </article>
+          </div>
+
+          <p>源码里最短的完整链路在 <code class="inline">minimal_demo.py</code>：</p>
+          <pre><code>from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+from hy3dgen.texgen import Hunyuan3DPaintPipeline
+
+pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained('tencent/Hunyuan3D-2')
+pipeline_texgen = Hunyuan3DPaintPipeline.from_pretrained('tencent/Hunyuan3D-2')
+
+mesh = pipeline_shapegen(image=image)[0]
+mesh = pipeline_texgen(mesh, image=image)
+mesh.export('demo.glb')</code></pre>
+
+          <p>按工程流程拆开看：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>输入图片。</strong>demo 读入 RGBA 图片；如果是 RGB，先用 <code class="inline">BackgroundRemover</code> 抠背景，避免背景干扰物体 3D 结构。</div>
+            <div class="flow-step" data-step="2"><strong>加载 shape pipeline。</strong><code class="inline">Hunyuan3DDiTFlowMatchingPipeline.from_pretrained()</code> 通过配置加载 <code class="inline">model</code>、<code class="inline">vae</code>、<code class="inline">scheduler</code>、<code class="inline">conditioner</code>、<code class="inline">image_processor</code>。</div>
+            <div class="flow-step" data-step="3"><strong>图片条件编码。</strong><code class="inline">prepare_image()</code> 做图片预处理，<code class="inline">encode_cond()</code> 用 conditioner 得到条件向量；需要 CFG 时还会拼 unconditional 条件。</div>
+            <div class="flow-step" data-step="4"><strong>形状 latent 采样。</strong>pipeline 用 <code class="inline">prepare_latents()</code> 初始化随机 latent，然后用 flow matching scheduler 设定 sigmas/timesteps，循环调用 DiT denoiser 预测更新方向。</div>
+            <div class="flow-step" data-step="5"><strong>VAE 解码成 mesh。</strong>采样后的 shape latent 进入 <code class="inline">ShapeVAE</code>，再经过 volume decoding 和 surface extraction，转成可导出的 <code class="inline">trimesh</code>。</div>
+            <div class="flow-step" data-step="6"><strong>纹理生成。</strong><code class="inline">Hunyuan3DPaintPipeline</code> 对 mesh 做 UV wrap，渲染多视角 normal/position 条件，用 multiview diffusion 生成多视角纹理图，再 bake 回 UV texture。</div>
+            <div class="flow-step" data-step="7"><strong>导出 3D 资产。</strong>纹理阶段把贴图写回 mesh，最后导出 <code class="inline">demo.glb</code>。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>形状生成模型：Hunyuan3D-DiT</h3>
+              <p><code class="inline">hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py</code> 里定义了 DiT denoiser。它把 shape latent 投影到 hidden size，把 timestep 编成向量，把图片条件投影进模型；然后先跑 double-stream blocks 让 latent 和 condition 交互，再跑 single-stream blocks，最后输出 latent 更新量。</p>
+            </article>
+            <article class="mini-card">
+              <h3>形状 VAE：ShapeVAE</h3>
+              <p><code class="inline">ShapeVAE</code> 不是视频 VAE，而是 3D 形状 latent 和 mesh/occupancy 表示之间的桥。<code class="inline">latents2mesh()</code> 先做 volume decoding 得到 grid logits，再用 marching cubes / surface extractor 提取表面。</p>
+            </article>
+            <article class="mini-card">
+              <h3>纹理生成：Hunyuan3D-Paint</h3>
+              <p><code class="inline">hy3dgen/texgen/pipelines.py</code> 里先做 delight 去高光/阴影，再渲染多视角 normal map 和 position map；多视角扩散模型生成各视角纹理后，<code class="inline">bake_from_multiview()</code> 把纹理投影回 UV 图。</p>
+            </article>
+            <article class="mini-card">
+              <h3>模型族</h3>
+              <p>README 的 model zoo 包括 Hunyuan3D-2、Hunyuan3D-2mini、Hunyuan3D-2mv、Turbo/Fast、Paint、Delight 等子模型。大模型质量更好，mini 更省资源，mv 面向多视角输入，Turbo/Fast 偏推理加速。</p>
+            </article>
+          </div>
+
+          <p>和 Wan2.2 视频生成对比，混元 3D 的核心差异是输出空间不同：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Wan2.2：视频 latent → 像素帧</h3>
+              <p>Wan 在视频 latent 空间去噪，VAE decode 成一帧帧 RGB 视频，最后保存 mp4。它关注时序一致性、运动和画面质量。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Hunyuan3D：shape latent → mesh + texture</h3>
+              <p>混元 3D 在 3D shape latent 空间生成几何，再把 surface 抽成 mesh，最后给 mesh 贴纹理。它关注几何拓扑、表面细节、UV 纹理和多视角一致性。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>Hunyuan3D-2 = 图片到 3D 资产的完整生成工程。</strong>主线是“图片条件 → DiT/flow matching 生成 shape latent → ShapeVAE 解码成 mesh → Paint 多视角生成纹理 → bake 到 UV → 导出 GLB”。</div>
+          <div class="refs">本地源码：<code class="inline">/root/Hunyuan3D-2</code>。参考文件：<code class="inline">README.md:72-99</code>、<code class="inline">README.md:124-160</code>、<code class="inline">README.md:190-216</code>、<code class="inline">minimal_demo.py</code>、<code class="inline">hy3dgen/shapegen/pipelines.py:94-220</code>、<code class="inline">hy3dgen/shapegen/pipelines.py:552-777</code>、<code class="inline">hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py:268-384</code>、<code class="inline">hy3dgen/shapegen/models/autoencoders/model.py:120-180</code>、<code class="inline">hy3dgen/texgen/pipelines.py:53-227</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
