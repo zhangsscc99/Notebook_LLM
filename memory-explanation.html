@@ -1004,11 +1004,12 @@
         <details class="toc-group" id="hunyuan3dTocGroup" open>
           <summary>
             <span class="toc-group-title">混元3D</span>
-            <span class="toc-count">2 sections</span>
+            <span class="toc-count">3 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
             <a href="#hunyuan3d-view-consistency">02 · 混元3D 是怎么确保生成的 3D 模型每个视角都一致的</a>
+            <a href="#hunyuan3d-training-view-consistency">03 · 训练阶段怎么让 2D 输入学会生成多视角一致的 3D</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -7043,6 +7044,92 @@ mesh.export('demo.glb')</code></pre>
 
           <div class="callout">最短记忆：<strong>一致性不是因为 2D 图包含所有视角，而是因为输出被约束成“同一个 3D 对象”。</strong>形状阶段输出单一 mesh；纹理阶段多视角生成只是中间步骤，最终仍 bake 到同一个 UV texture。</div>
           <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:424-510</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:700-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:171-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:198-275</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:33-50</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:110-146</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:190-240</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:55-79</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:176-235</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:502-580</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-training-view-consistency">
+          <div class="section-header"><div class="index">HY3D3</div><h2>训练阶段：混元3D 怎么让 2D 输入学会生成多视角一致的 3D</h2></div>
+          <p>这次只讲<strong>训练阶段</strong>。先说清一个事实：<code class="inline">/root/Hunyuan3D-2</code> 这个仓库主要是推理代码和预训练模型调用，README 也写明完整训练代码是在 Hunyuan3D-2.1 发布的。因此这里不能假装当前仓库里有完整 train loop / loss 文件；能确定的是它的模型接口、VAE/DiT/多视角纹理结构，以及训练时必须依赖的监督逻辑。</p>
+          <div class="callout"><strong>一句话：</strong>训练时不是让模型从单张 2D 图“凭空知道所有视角”，而是用完整 3D 资产/多视角渲染数据做监督：同一个 3D 物体会产生一个完整 shape latent 和多张已知相机视角图；模型学习的是 <code class="inline">P(完整3D形状 | 2D条件图)</code>，而不是学习把一张图拉伸成 3D。</div>
+
+          <p>训练阶段可以拆成三层：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先训练/获得 3D 形状 latent 空间。</strong>ShapeVAE 面向的是完整 3D 几何。源码里 <code class="inline">ShapeVAE.latent_shape=(num_latents, embed_dim)</code>，<code class="inline">latents2mesh()</code> 会把 latent 解码成 volume logits，再做 surface extraction。训练这个 VAE 时，监督目标不是某个视角图片，而是完整 3D surface / occupancy / mesh 表示。</div>
+            <div class="flow-step" data-step="2"><strong>再训练 image-conditioned shape diffusion。</strong>训练样本可以理解为：从一个 3D 资产渲染一张或多张条件图，同时知道这个资产对应的完整 3D latent。DiT 学的是在 flow/diffusion timestep 上，从 noisy shape latent 恢复 clean shape latent，条件是 2D 图片编码。</div>
+            <div class="flow-step" data-step="3"><strong>最后训练多视角纹理生成。</strong>纹理模型不是独立给每个视角画图，而是在训练中看到同一 mesh 的多视角渲染、normal/position 条件、camera embedding 和参考图，让多个视角共享几何条件和外观信息。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 关键不是单图，而是训练标签是完整 3D</h3>
+              <p>一张 2D 图确实只看到一个视角，但训练数据不是只有这张图。训练时每个样本背后有完整 3D 资产，所以模型被监督去预测完整对象的 latent。也就是说，条件是 2D，答案是 3D。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 不可见区域靠 3D 先验学习</h3>
+              <p>背面、底部、遮挡区域不是从单图中直接读出来的，而是从大量 3D 数据统计里学出来的。比如看到正面的椅子，模型学到椅子通常有厚度、背板、腿的位置关系；看到角色正面，模型学到头身比例和背面可能结构。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. 多个条件视角会对齐到同一个 latent</h3>
+              <p>如果训练中同一 3D 资产能从不同相机渲染成不同 2D 条件图，那么这些不同条件图的目标都是同一个完整 3D shape latent。这个训练信号会逼模型学会“视角变化不改变物体身份”。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 损失发生在 3D latent / denoising 目标上</h3>
+              <p>形状 DiT 的训练目标不是让正面图像素匹配，而是让模型在 diffusion/flow matching 过程中预测正确的 latent 更新方向，最终还原完整 3D shape latent。这样一致性从目标空间上就被约束成 3D。</p>
+            </article>
+          </div>
+
+          <p>把 shape 阶段训练写成伪流程，大概是：</p>
+          <pre><code>对每个训练 3D asset：
+1. 准备完整 3D 几何：mesh / surface points / occupancy field
+2. 渲染一个或多个 2D 条件视角：image_front, image_side, ...
+3. 用 ShapeVAE 把完整 3D 几何编码成 clean_shape_latent
+4. 给 clean_shape_latent 加噪，采样 diffusion / flow timestep
+5. 用 2D image encoder / conditioner 编码条件图
+6. DiT(noisy_shape_latent, timestep, image_condition) 预测 denoising / flow 目标
+7. 优化 latent denoising loss
+
+结果：模型学到从单张/多张 2D 条件图推断完整 3D latent 的条件分布。</code></pre>
+
+          <p>纹理阶段的训练一致性又是另一套逻辑：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>训练数据来自同一个 3D 物体的多视角渲染。</strong>每个视角的 RGB 图、normal map、position map、camera id 都来自同一个 mesh/texture，因此训练标签天然多视角一致。</div>
+            <div class="flow-step" data-step="2"><strong>模型结构允许视角之间通信。</strong>源码的 <code class="inline">hunyuanpaint/unet/modules.py</code> 有 <code class="inline">attn_multiview</code> 和 <code class="inline">attn_refview</code>。训练时如果多视角一起进 batch，视角 token 之间可以通过 multiview attention 交换信息。</div>
+            <div class="flow-step" data-step="3"><strong>normal/position map 提供 3D 对齐坐标。</strong>仅用 RGB 多视角，模型不知道哪些像素是同一个 3D 表面；position map 把像素绑定到 3D 坐标，normal map 提供表面朝向，帮助模型学跨视角纹理对应关系。</div>
+            <div class="flow-step" data-step="4"><strong>训练目标仍是扩散去噪。</strong>纹理扩散模型在多视角图像 latent 上做去噪训练，但条件包含参考图、相机信息、normal/position 结构图，所以学到的是受 3D 几何约束的多视角纹理分布。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么训练时看过多视角，推理时可以单图</h3>
+              <p>训练阶段，模型从大量样本中学习“这个类别/轮廓/纹理在 3D 中通常如何闭合”。推理阶段只有一张图时，它把可见信息作为强条件，把不可见部分按训练得到的条件分布补全。</p>
+            </article>
+            <article class="mini-card">
+              <h3>这和 NeRF 那种多视角重建不一样</h3>
+              <p>NeRF/3DGS 常常需要同一场景多张真实视角来重建特定对象；混元3D 更像生成模型：训练时看过大量 3D 对象和多视角监督，推理时对单个新对象做条件生成，不保证背面是真实背面，只保证生成一个合理一致的 3D 对象。</p>
+            </article>
+          </div>
+
+          <p>所以，“每个视角一致”在训练阶段主要来自这几个硬约束：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>约束 A：目标是完整 3D latent</h3>
+              <p>训练标签不是几张互相独立的 2D 图，而是完整 3D 形状 latent。这个目标空间本身就是视角无关的。</p>
+            </article>
+            <article class="mini-card">
+              <h3>约束 B：同一资产多视角共享同一个 3D 身份</h3>
+              <p>同一 mesh 渲染出来的不同视角，应该对应同一个 shape latent / 同一个纹理身份。这会让模型学到视角不变性。</p>
+            </article>
+            <article class="mini-card">
+              <h3>约束 C：多视角纹理结构显式通信</h3>
+              <p>纹理 UNet 中的 multiview attention / reference attention 让多个视角生成时不是彼此孤立，训练时能学习跨视角共享颜色、图案和风格。</p>
+            </article>
+            <article class="mini-card">
+              <h3>约束 D：normal/position/camera 条件提供几何坐标</h3>
+              <p>这些条件让网络知道每个视角图像素对应哪个方向、哪个表面位置，减少“每个视角自由发挥”的空间。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>训练阶段的一致性来自监督数据和目标空间。</strong>2D 图只是条件；训练答案是完整 3D asset 的 latent/mesh 和同一 mesh 的多视角纹理。模型学到的是“从可见 2D 证据 + 大规模 3D 先验，生成一个统一 3D 对象”。这能保证合理一致，但不能保证不可见背面一定等于真实物体背面。</div>
+          <div class="refs">参考源码/资料：<code class="inline">/root/Hunyuan3D-2/README.md:39</code>、<code class="inline">/root/Hunyuan3D-2/README.md:56</code>、<code class="inline">/root/Hunyuan3D-2/assets/report/Tencent_Hunyuan3D_2_0.pdf</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:424-510</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:700-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:171-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:198-275</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:33-50</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:110-146</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:55-79</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:176-235</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
