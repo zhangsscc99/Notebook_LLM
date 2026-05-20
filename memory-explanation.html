@@ -1004,7 +1004,7 @@
         <details class="toc-group" id="hunyuan3dTocGroup" open>
           <summary>
             <span class="toc-group-title">混元3D</span>
-            <span class="toc-count">6 sections</span>
+            <span class="toc-count">9 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
@@ -1013,6 +1013,9 @@
             <a href="#hunyuan3d-dit-vit-llm-output">04 · 项目用的是 DiT 还是 ViT，和 LLM 的输出原理有什么不同</a>
             <a href="#hunyuan3d-training-data-latents">05 · 训练时输入是图片输出是 latents 吗，训练数据集怎么构造</a>
             <a href="#hunyuan3d-complete-pipeline-vs-llm">06 · 完整 pipeline 是什么，和 LLM 最不一样的地方在哪里</a>
+            <a href="#hunyuan3d-latent-denoising-principle">07 · 3D latent 迭代去噪是什么原理</a>
+            <a href="#hunyuan3d-latent-to-mesh-decoding">08 · latent 是如何解码成 mesh 的，是按规则还是模型</a>
+            <a href="#hunyuan3d-velocity-noise-latent-update">09 · 模型预测 velocity/noise 是什么，和 latent 更新是什么关系</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -7403,6 +7406,180 @@ image
 
           <div class="callout">最短总结：<strong>混元3D 的完整 pipeline 是生成模型 + 几何解码器 + 图形渲染/纹理系统的组合。</strong>它和 LLM 最大不同不是“输入是不是图片”，而是输出机制：LLM 的输出头接词表；混元3D 的 DiT 输出连续 latent 更新量，最终 3D 文件由 VAE、surface extraction 和 texture baking 这些组件共同产出。</div>
           <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/minimal_demo.py</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:473-488</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:740-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:650-668</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py:270-410</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:158-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:190-240</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-latent-denoising-principle">
+          <div class="section-header"><div class="index">HY3D7</div><h2>3D latent 迭代去噪是什么原理</h2></div>
+          <p><strong>3D latent 迭代去噪</strong>的核心是：先不要直接生成 mesh，而是在 ShapeVAE 定义的连续 3D 隐空间里，从一团随机噪声 latent 出发，经过很多步把它推向“像真实 3D 物体”的 clean shape latent。</p>
+          <div class="callout"><strong>一句话：</strong>混元3D 的 DiT 每一步不是输出最终 3D 模型，而是看当前 noisy latent、时间步 t、图片条件，预测“这个 latent 应该往哪个方向移动”；scheduler 用这个方向更新 latent，多步之后才得到 clean latent。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>训练时有 clean latent。</strong>Hunyuan3D-2.1 训练代码里，真实 3D surface 会先通过 <code class="inline">ShapeVAE.encode(surface)</code> 编成 clean latent，记作 <code class="inline">x1</code>。</div>
+            <div class="flow-step" data-step="2"><strong>再采样噪声 latent。</strong><code class="inline">transport.sample(x1)</code> 里用 <code class="inline">x0 = randn_like(x1)</code> 生成随机噪声 latent。</div>
+            <div class="flow-step" data-step="3"><strong>构造中间状态 xt。</strong><code class="inline">ICPlan.compute_mu_t()</code> 的线性路径可以理解为 <code class="inline">xt = t * x1 + (1 - t) * x0</code>：t 越小越像噪声，t 越大越像真实 3D latent。</div>
+            <div class="flow-step" data-step="4"><strong>模型学会预测移动方向。</strong><code class="inline">training_losses()</code> 把 <code class="inline">xt</code>、<code class="inline">t</code> 和图片条件送入模型，模型输出一个与 latent 同形状的向量，并用 MSE 对齐目标方向 <code class="inline">ut</code>。</div>
+            <div class="flow-step" data-step="5"><strong>推理时反过来走。</strong>推理没有真实 <code class="inline">x1</code>，所以从随机 latent 开始；每一步 DiT 预测方向，scheduler 通过欧拉步更新 latent，逐步接近 clean shape latent。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么不直接生成 mesh</h3>
+              <p>mesh 是可变拓扑的顶点/面集合，长度不固定，很难像文本 token 一样直接生成。latent 是固定形状的连续张量，适合 Transformer/DiT 做并行建模和多步去噪。</p>
+            </article>
+            <article class="mini-card">
+              <h3>图片条件起什么作用</h3>
+              <p>图片经 DINO/CLIP encoder 变成 condition tokens。DiT 预测每一步 latent 移动方向时，会结合这些条件，让 latent 往“符合输入图片的 3D 物体”方向走。</p>
+            </article>
+            <article class="mini-card">
+              <h3>迭代去噪和 LLM 有什么不同</h3>
+              <p>LLM 是把 token 一个一个 append 到序列后面；3D latent 去噪是同一个 latent tensor 被反复整体修改。它不是生成第 1 个顶点、第 2 个顶点，而是整块 3D 表示逐步 refinement。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么要很多步</h3>
+              <p>一步从纯噪声跳到好 3D 很难。flow matching 把这个难问题拆成很多小步，每一步只预测局部方向，最终轨迹更稳定。</p>
+            </article>
+          </div>
+
+          <pre><code>训练：
+clean 3D surface -> ShapeVAE.encode -> clean latent x1
+noise latent x0 = randn_like(x1)
+xt = interpolate(x0, x1, t)
+DiT(xt, t, image_condition) -> velocity target
+loss = MSE(pred, target)
+
+推理：
+latent = random noise
+for t in timesteps:
+    direction = DiT(latent, t, image_condition)
+    latent = scheduler.step(direction, t, latent)
+mesh = ShapeVAE.latents2mesh(latent)</code></pre>
+
+          <div class="callout">最短记忆：<strong>3D latent 迭代去噪 = 在固定形状的 3D 隐空间里走一条从噪声到真实物体的轨迹。</strong>DiT 负责预测方向，scheduler 负责按时间步更新 latent。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/transport.py:138-183</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/path.py:139-162</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:740-759</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-latent-to-mesh-decoding">
+          <div class="section-header"><div class="index">HY3D8</div><h2>latent 是如何解码成 mesh 的，是按规则还是模型</h2></div>
+          <p>latent 到 mesh 不是一个简单规则，也不是 DiT 直接吐顶点。它分两段：<strong>先由神经网络把 latent 解码成 3D 空间里的场函数 / grid logits；再由确定性几何算法从这个场里抽取表面。</strong></p>
+          <div class="callout"><strong>一句话：</strong>latent → volume field 是模型学出来的；volume field → mesh 是几何算法抽出来的。前半段是神经网络，后半段通常是 marching cubes / DMC 这类规则化 surface extraction。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>采样结束得到 shape latent。</strong>pipeline 的 <code class="inline">_export()</code> 收到最终 latents，如果输出不是 <code class="inline">latent</code>，就开始解码。</div>
+            <div class="flow-step" data-step="2"><strong>先做 scale 和 ShapeVAE forward。</strong>源码先 <code class="inline">latents = 1. / self.vae.scale_factor * latents</code>，再 <code class="inline">latents = self.vae(latents)</code>。ShapeVAE 内部用 <code class="inline">post_kl</code> 和 Transformer 处理 latent。</div>
+            <div class="flow-step" data-step="3"><strong>volume decoder 查询 3D 网格点。</strong><code class="inline">VanillaVolumeDecoder</code> 会在 bounding box 里生成密集 3D query points，比如按 octree resolution 生成 x/y/z 网格。</div>
+            <div class="flow-step" data-step="4"><strong>geo_decoder 预测每个点的 logit。</strong>volume decoder 把 query points 分 chunk 喂给 <code class="inline">geo_decoder(queries, latents)</code>，得到每个 3D 位置的 occupancy/SDF-like logit。</div>
+            <div class="flow-step" data-step="5"><strong>得到 grid_logits。</strong>所有 chunk 拼回一个 3D grid：<code class="inline">grid_logits = [B, D, D, D]</code>。这可以理解成“空间中每个格点在物体内外/表面附近的分数”。</div>
+            <div class="flow-step" data-step="6"><strong>surface extractor 抽 mesh。</strong><code class="inline">MCSurfaceExtractor</code> 调 <code class="inline">measure.marching_cubes(grid_logit, mc_level)</code>，从等值面里抽出 vertices 和 faces。</div>
+            <div class="flow-step" data-step="7"><strong>转成 trimesh / GLB。</strong>抽出的顶点和面会包装成 <code class="inline">Latent2MeshOutput</code>，再由 <code class="inline">export_to_trimesh()</code> 转成 <code class="inline">trimesh.Trimesh</code>，最终导出 glb。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>哪些是模型学的</h3>
+              <p>ShapeVAE 的 latent 表示、Transformer 处理、geo_decoder 如何根据 latent 和 3D 坐标预测 logit，这些是神经网络学出来的。</p>
+            </article>
+            <article class="mini-card">
+              <h3>哪些是规则算法</h3>
+              <p>在 3D bounding box 里采样网格点、把 logits reshape 成 3D grid、marching cubes 从等值面抽 vertices/faces，这些是确定性几何算法。</p>
+            </article>
+            <article class="mini-card">
+              <h3>marching cubes 是什么</h3>
+              <p>它把 3D 标量场里的某个等值面抽成三角网格。比如 <code class="inline">mc_level=0</code> 时，就找 logit 从负到正穿过 0 的地方，拼成物体表面。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么不是直接输出顶点</h3>
+              <p>直接输出顶点/面很难处理可变拓扑。用场函数再抽表面，可以自然表达洞、多个部件、复杂拓扑，最后由几何算法统一生成 mesh。</p>
+            </article>
+          </div>
+
+          <pre><code>latent -> mesh：
+final latent
+  -> ShapeVAE.forward(latent)
+  -> volume_decoder: 对 3D 网格点逐点查询 geo_decoder
+  -> grid_logits: 3D 标量场
+  -> surface_extractor: marching_cubes / DMC
+  -> vertices + faces
+  -> trimesh / glb</code></pre>
+
+          <div class="callout">最短总结：<strong>latent 解码成 mesh 是“神经场预测 + 几何抽表面”的组合。</strong>不是纯规则，也不是模型直接输出 mesh 文件。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:650-668</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:171-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:279-282</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/volume_decoders.py:141-182</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/surface_extractors.py:37-76</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-velocity-noise-latent-update">
+          <div class="section-header"><div class="index">HY3D9</div><h2>模型预测 velocity / noise 是什么，和 latent 更新是什么关系</h2></div>
+          <p>严格讲，模型并不是每一步直接预测“最终 latent 长什么样”。它预测的是一个<strong>更新方向</strong>。这个方向可以参数化成 noise、score、velocity 等形式；Hunyuan3D-2.1 的训练配置里写的是 <code class="inline">prediction: velocity</code>。</p>
+          <div class="callout"><strong>一句话：</strong>latent 的迭代更新确实是先预测 velocity/noise 这类方向量，再由 scheduler 用这个方向量更新 latent。velocity 可以理解成“在 latent 空间里，从当前 noisy 状态朝 clean 3D 状态移动的速度/向量场”。</div>
+
+          <p>先区分三个量：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. clean latent x1</h3>
+              <p>真实 3D surface 经过 ShapeVAE encode 得到的目标 latent。训练时知道，推理时不知道。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. noisy/current latent xt</h3>
+              <p>训练时由 noise latent <code class="inline">x0</code> 和 clean latent <code class="inline">x1</code> 按时间 t 插值得到；推理时就是当前迭代中的 latents。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. velocity / noise prediction</h3>
+              <p>模型输出的不是 mesh，也不是一定直接输出 x1，而是一个与 latent 同形状的向量，告诉 scheduler 当前 <code class="inline">xt</code> 应该怎么动。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. scheduler step</h3>
+              <p>scheduler 根据当前 sigma/timestep，把模型输出转成下一步 latent。源码里 FlowMatch Euler 形式是 <code class="inline">prev_sample = sample + (sigma_next - sigma) * model_output</code>。</p>
+            </article>
+          </div>
+
+          <p>velocity 到底是什么？看 Hunyuan3D-2.1 的线性路径：</p>
+          <pre><code>路径：xt = t * x1 + (1 - t) * x0
+其中：
+x0 = 纯噪声 latent
+x1 = clean 3D shape latent
+t  = 当前时间，越接近 1 越接近 x1
+
+对 t 求导：
+velocity = d xt / d t = x1 - x0
+
+所以 velocity 不是速度单位的物理速度，
+而是 latent 空间中“从噪声点指向数据点”的方向场。</code></pre>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>训练时构造目标 velocity。</strong><code class="inline">path.plan(t, x0, x1)</code> 返回 <code class="inline">xt</code> 和 <code class="inline">ut</code>。在线性路径里，<code class="inline">ut</code> 就是从噪声到数据的方向。</div>
+            <div class="flow-step" data-step="2"><strong>DiT 预测这个方向。</strong><code class="inline">model_output = model(xt, t, contexts)</code>，如果是 velocity 模式，就用 <code class="inline">MSE(model_output, ut)</code> 训练。</div>
+            <div class="flow-step" data-step="3"><strong>推理时没有目标，只能预测。</strong>从随机 latent 开始，模型根据图片条件判断当前 latent 应该往哪个方向动。</div>
+            <div class="flow-step" data-step="4"><strong>scheduler 真正修改 latent。</strong>模型只给方向，scheduler 决定步长和公式。Hunyuan3D 推理里每一步 <code class="inline">latents = outputs.prev_sample</code>。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么不直接预测 clean latent</h3>
+              <p>可以设计成预测 clean sample，但扩散/flow 模型常用 noise/velocity/score 参数化，因为在不同噪声水平下学习“局部方向”更稳定，也更适合 ODE/SDE solver 多步积分。</p>
+            </article>
+            <article class="mini-card">
+              <h3>noise 和 velocity 有什么关系</h3>
+              <p>noise 参数化是让模型预测噪声成分；velocity 参数化是让模型预测从噪声分布到数据分布的向量场。源码的 <code class="inline">path.py</code> 里也提供 <code class="inline">get_noise_from_velocity()</code>、<code class="inline">get_score_from_velocity()</code> 这类转换。</p>
+            </article>
+            <article class="mini-card">
+              <h3>所以模型预测 latent 吗</h3>
+              <p>不是直接预测最终 latent；但它预测的是 latent 空间里的向量，scheduler 用这个向量更新 latent。因此最终 latent 是一步步积分出来的。</p>
+            </article>
+            <article class="mini-card">
+              <h3>noise_pred 变量名会不会误导</h3>
+              <p>会。推理代码里变量叫 <code class="inline">noise_pred</code>，但在 flow matching / velocity 模式下，它更准确地说是 model_output / velocity-like update。变量名沿用了 diffusion 习惯。</p>
+            </article>
+          </div>
+
+          <pre><code>推理更新关系：
+latents 当前值 = sample
+model_output = DiT(sample, timestep, image_condition)
+prev_sample = sample + step_size * model_output
+latents = prev_sample
+
+多步重复后：
+random latent -> clean shape latent -> mesh</code></pre>
+
+          <div class="callout">最短总结：<strong>velocity 是 latent 空间里的移动方向，不是最终答案。</strong>模型预测 velocity/noise，scheduler 按步长更新 latent；最终 clean latent 是多步更新累计出来的。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/configs/hunyuandit-finetuning-flowmatching-dinol518-bf16-lr1e5-4096.yaml</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/transport.py:173-183</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/transport.py:219-229</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/path.py:95-125</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/path.py:139-162</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/schedulers.py:245-318</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:740-759</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
