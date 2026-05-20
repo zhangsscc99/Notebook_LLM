@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">22 sections</span>
+            <span class="toc-count">25 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -935,6 +935,9 @@
             <a href="#fastapply-project-reward-hacking-cases">20 · 我们项目里可能有哪些 reward hacking</a>
             <a href="#fastapply-reward-hacking-mitigation">21 · 怎么防止 FastApply reward 被 hack</a>
             <a href="#fastapply-data-cleaning-49-image-report">22 · 49 张微信图数据清洗流程复刻</a>
+            <a href="#fastapply-cleaning-techniques">23 · 数据清洗的几个关键技巧是什么</a>
+            <a href="#fastapply-minhash-deep-dive">24 · 详解 MinHash</a>
+            <a href="#fastapply-lsh-deep-dive">25 · 详解 LSH</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -2245,6 +2248,132 @@ similarity 很高，但功能没修</code></pre>
 
           <div class="callout">一句话：这 49 张图复刻的是“从 Git diff 到可训练 GRPO prompt”的数据工厂，核心是 <strong>Hunk 行号 + AST Unit + Rule Filter</strong> 三者对齐。</div>
         </section>
+
+        <section class="section reveal" id="fastapply-cleaning-techniques">
+          <div class="section-header"><div class="index">23</div><h2>数据清洗的几个关键技巧是什么</h2></div>
+          <p>FastApply 这类代码 patch 数据，清洗重点不是“样本越多越好”，而是让每条样本都满足：<strong>diff 能复现、修改点可定位、代码能解析、训练目标不含噪声</strong>。</p>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先 replay patch。</strong> SEARCH/REPLACE 必须真的能把 <code class="inline">old_source</code> 变成 <code class="inline">new_source</code>，否则模型学到的是错编辑。</div>
+            <div class="flow-step" data-step="2"><strong>用 Hunk 行号对齐 AST。</strong> 通过 <code class="inline">Span</code>、<code class="inline">Hunk</code>、<code class="inline">ChangeContext</code> 判断改动属于 import、function、class 还是 statement。</div>
+            <div class="flow-step" data-step="3"><strong>过滤非功能改动。</strong> 纯注释、纯空白、纯 docstring、格式化大改，reward 很容易误判，训练价值低。</div>
+            <div class="flow-step" data-step="4"><strong>控制长度和 hunk 数。</strong> 太长会吃上下文，hunk 太多会把任务变成“大重写”，不适合早期 GRPO。</div>
+            <div class="flow-step" data-step="5"><strong>按文件 / repo 做 split。</strong> 不要同一个文件的相似 patch 同时出现在 train 和 test，否则评估虚高。</div>
+            <div class="flow-step" data-step="6"><strong>近重复去重。</strong> 用 signature / MinHash / LSH 去掉模板化样本，避免模型靠背答案刷 reward。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>我们项目里对应哪里</h3>
+              <ul>
+                <li><code class="inline">build/parse.py</code>：把 diff 切成 hunk，再生成 changes。</li>
+                <li><code class="inline">data/types.py</code>：Span/Hunk/UnitState/ChangeContext。</li>
+                <li><code class="inline">build/filter.py</code>：AST 规则过滤 functional/import 修改。</li>
+                <li><code class="inline">build/generate.py</code>：长度、语法、规则综合清洗。</li>
+                <li><code class="inline">build/deduplicate.py</code>：近重复去重。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>最容易踩坑</h3>
+              <ul>
+                <li>只看 diff 文本，不验证 patch 是否可应用。</li>
+                <li>把语法检查当单测：syntax 只能说明“能 parse”，不能说明逻辑正确。</li>
+                <li>随机 split 导致同 repo 同文件泄漏。</li>
+                <li>去重只按全文 exact，漏掉变量名不同但结构一样的重复样本。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">一句话：高质量清洗 = <strong>可复现编辑 + AST 定位 + 语法过滤 + 长度控制 + 去重 + 防泄漏 split</strong>。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-minhash-deep-dive">
+          <div class="section-header"><div class="index">24</div><h2>详解 MinHash</h2></div>
+          <p><strong>MinHash</strong> 是用来估计两个集合 Jaccard 相似度的压缩签名方法。它特别适合代码数据去重：不需要逐对比较完整代码，只比较很短的 signature。</p>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>把代码变集合。</strong> 先规范化代码：去空白、变量名抽象成 ID、数字抽象成 NUM，再切 token shingles。</div>
+            <div class="flow-step" data-step="2"><strong>做多组 hash。</strong> 对每个 shingle 用很多个 hash 函数计算哈希值。</div>
+            <div class="flow-step" data-step="3"><strong>每组取最小值。</strong> 每个 hash 函数只保留最小 hash，这些最小值拼起来就是 MinHash signature。</div>
+            <div class="flow-step" data-step="4"><strong>估计相似度。</strong> 两个 signature 对应位置相等的比例，大约等于两个原集合的 Jaccard 相似度。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么适合代码去重</h3>
+              <p>很多代码样本只是变量名、函数名、常量不同，结构几乎一样。MinHash 可以在“结构相似”层面发现近重复，比 exact hash 更强。</p>
+              <pre><code>def add_user(x): return db.save(x)
+def create_user(user): return db.save(user)
+# exact 不同，但 token/AST 结构很像</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>它不是语义等价判断</h3>
+              <p>MinHash 只看集合重叠，不懂程序语义。两个代码 token 很像但逻辑可能相反；两个代码 token 差异大也可能语义等价。所以它用于“候选去重”，不是最终 correctness reward。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>参数影响</h3>
+              <ul>
+                <li>signature 越长，估计越稳定，但存储和计算更重。</li>
+                <li>shingle 越短，召回更高但误杀更多。</li>
+                <li>shingle 越长，更精确但漏掉轻微改写的重复。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>在本项目里的位置</h3>
+              <p><code class="inline">build/deduplicate.py</code> 目前保留了 <code class="inline">Signature</code> 接口，用轻量 hash fallback 跑通；真实大数据时可以替换成 datasketch MinHash。</p>
+            </article>
+          </div>
+
+          <div class="callout">一句话：MinHash 是把“大代码集合相似度”压缩成“小签名相似度”的办法，用来快速找近重复。</div>
+        </section>
+
+        <section class="section reveal" id="fastapply-lsh-deep-dive">
+          <div class="section-header"><div class="index">25</div><h2>详解 LSH</h2></div>
+          <p><strong>LSH</strong> 是 Locality-Sensitive Hashing，目标是让“相似样本更可能落到同一个桶里”。它通常接在 MinHash 后面，用来避免 O(N²) 的全量两两比较。</p>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先拿 MinHash signature。</strong> 每条代码样本都有一个固定长度签名。</div>
+            <div class="flow-step" data-step="2"><strong>切 band。</strong> 把签名切成多个 band，每个 band 有若干 row。</div>
+            <div class="flow-step" data-step="3"><strong>band 内哈希入桶。</strong> 如果两个样本某个 band 完全一样，就会落进同一个桶。</div>
+            <div class="flow-step" data-step="4"><strong>桶内才精比较。</strong> 只对同桶候选再算 Jaccard / similarity，跳过绝大多数不相关 pair。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>band / row 怎么理解</h3>
+              <p>band 越多，每个 band 越短，越容易撞桶，召回高但误报多；band 越少，每个 band 越长，撞桶更难，精度高但漏报多。</p>
+              <pre><code>signature 长度 = bands × rows
+候选条件 = 至少一个 band 完全相等</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>为什么不是直接 MinHash 两两比</h3>
+              <p>假设 100 万条样本，两两比较约 5e11 对，不现实。LSH 先把可能相似的样本捞出来，通常只剩很小的候选集合。</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>数据清洗里怎么用</h3>
+              <ul>
+                <li>先对 update/new_source 做 normalize。</li>
+                <li>生成 token shingle 集合。</li>
+                <li>生成 MinHash signature。</li>
+                <li>用 LSH 找相似候选。</li>
+                <li>超过阈值的样本只保留一条。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>对 GRPO 的价值</h3>
+              <p>去掉近重复后，group 内采样更有差异，reward 不会被模板样本主导；测试集也更难被 train 里的相似代码泄漏污染。</p>
+            </article>
+          </div>
+
+          <div class="callout">一句话：MinHash 负责“压缩相似度”，LSH 负责“快速召回可能相似的候选”。两者合起来就是大规模代码数据去重的常见组合。</div>
+        </section>
+
 
         <section class="section reveal" id="s1">
           <div class="section-header"><div class="index">01</div><h2>memory 的本质是什么</h2></div>
