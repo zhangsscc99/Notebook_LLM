@@ -910,7 +910,7 @@
         <details class="toc-group" id="newQuestionsTocGroup" open>
           <summary>
             <span class="toc-group-title">minT训练</span>
-            <span class="toc-count">21 sections</span>
+            <span class="toc-count">22 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#mint-simple-training-report">01 · MinT 简单训练报告</a>
@@ -934,6 +934,7 @@
             <a href="#swebench-40b-81-reward-hacking">19 · 为什么 40B 模型能在 SWE-bench Verified 打出 81 高分</a>
             <a href="#fastapply-project-reward-hacking-cases">20 · 我们项目里可能有哪些 reward hacking</a>
             <a href="#fastapply-reward-hacking-mitigation">21 · 怎么防止 FastApply reward 被 hack</a>
+            <a href="#fastapply-data-cleaning-49-image-report">22 · 49 张微信图数据清洗流程复刻</a>
           </div>
         </details>
         <details class="toc-group" id="openclawGatewayTocGroup" open>
@@ -2192,6 +2193,58 @@ similarity 很高，但功能没修</code></pre>
           <div class="callout">一句话：FastApply 的 reward 要防 hack，就不能只看“像不像答案”，还要看“patch 是否真的被应用、代码是否能跑、输出是否能被下游稳定消费”。</div>
         </section>
 
+
+        <section class="section reveal" id="fastapply-data-cleaning-49-image-report">
+          <div class="section-header"><div class="index">22</div><h2>49 张微信图 FastApply 数据清洗流程复刻报告</h2></div>
+          <p>这次新增的 49 张微信图片主要不是 GRPO loss 本身，而是 <strong>GRPO 训练前的数据清洗 / 构建 pipeline</strong>。我已经把截图里的文件和源码结构迁移到训练项目：<code class="inline">rl_master/applications/fastapply/data</code> 与 <code class="inline">rl_master/applications/fastapply/build</code>。</p>
+
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>extract：</strong>从 Git 仓库单父 commit 抽取 source 文件 diff，同时取 <code class="inline">old_source</code> 和 <code class="inline">new_source</code>。</div>
+            <div class="flow-step" data-step="2"><strong>parse：</strong>把 unified diff 切成 <code class="inline">Hunk</code>，生成每个 hunk 的 SEARCH/REPLACE <code class="inline">changes</code>。</div>
+            <div class="flow-step" data-step="3"><strong>AST：</strong>把 old/new 代码解析成 <code class="inline">Unit</code> 树，Unit 有 type、span、parent、children。</div>
+            <div class="flow-step" data-step="4"><strong>context：</strong><code class="inline">ChangeContext</code> 把 hunk 的 +/- 行号映射到 Unit，定位到底改了 import、function、class 还是 statement。</div>
+            <div class="flow-step" data-step="5"><strong>filter：</strong>过滤空源码、非源码后缀、hunk 太多、样本太长、语法失败、没有 functional 修改的样本；截图规则也支持要求 import 修改。</div>
+            <div class="flow-step" data-step="6"><strong>convert：</strong>最后转成 GRPO 行：prompt、reward_model.ground_truth、extra_info、response 的 <code class="inline">&lt;updated&gt;</code>。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>复刻的核心数据结构</h3>
+              <ul>
+                <li><code class="inline">Span</code>：1-based inclusive 行范围，支持 overlap / union / subtract / merge。</li>
+                <li><code class="inline">Hunk</code>：解析 <code class="inline">@@ -old +new @@</code>，精确记录删除行和新增行。</li>
+                <li><code class="inline">Unit</code>：AST 单元，表示 import、class、function、statement 等。</li>
+                <li><code class="inline">UnitState</code>：标记某个 Unit 是否被修改、是否部分修改。</li>
+                <li><code class="inline">ChangeContext</code>：把 hunk changes 映射回 Unit。</li>
+              </ul>
+            </article>
+            <article class="mini-card">
+              <h3>复刻的文件模块</h3>
+              <ul>
+                <li><code class="inline">data/types.py</code>、<code class="inline">data/utils.py</code>、<code class="inline">data/ops.py</code></li>
+                <li><code class="inline">data/ast/ast_base.py</code>、<code class="inline">ast_python.py</code>、<code class="inline">ast_java.py</code></li>
+                <li><code class="inline">build/extract.py</code>、<code class="inline">parse.py</code>、<code class="inline">filter.py</code>、<code class="inline">generate.py</code></li>
+                <li><code class="inline">build/make.py</code>、<code class="inline">deduplicate.py</code>、<code class="inline">convert.py</code>、<code class="inline">analyze.py</code>、<code class="inline">archive.py</code></li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>清洗精髓</h3>
+              <p>不是随便拿 diff 训练，而是先用 hunk 行号和 AST scope 对齐：只有知道“这几行属于哪个函数 / 类 / import”，才能过滤掉注释噪声、格式噪声、超长样本和不可解析样本。</p>
+            </article>
+            <article class="mini-card">
+              <h3>本项目适配</h3>
+              <p>截图原版依赖 tree-sitter、datasets、datasketch、LLM 服务。本项目保留同名类和调用链，但加了轻量 fallback，所以当前服务器可直接跑 tiny 数据。</p>
+            </article>
+          </div>
+
+          <pre><code>./mint_simple_training/.venv/bin/python tests/test_fastapply_data_cleaning.py
+# fastapply data cleaning smoke tests passed</code></pre>
+
+          <div class="callout">一句话：这 49 张图复刻的是“从 Git diff 到可训练 GRPO prompt”的数据工厂，核心是 <strong>Hunk 行号 + AST Unit + Rule Filter</strong> 三者对齐。</div>
+        </section>
 
         <section class="section reveal" id="s1">
           <div class="section-header"><div class="index">01</div><h2>memory 的本质是什么</h2></div>
