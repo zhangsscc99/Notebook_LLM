@@ -1004,7 +1004,7 @@
         <details class="toc-group" id="hunyuan3dTocGroup" open>
           <summary>
             <span class="toc-group-title">混元3D</span>
-            <span class="toc-count">5 sections</span>
+            <span class="toc-count">6 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
@@ -1012,6 +1012,7 @@
             <a href="#hunyuan3d-training-view-consistency">03 · 训练阶段怎么让 2D 输入学会生成多视角一致的 3D</a>
             <a href="#hunyuan3d-dit-vit-llm-output">04 · 项目用的是 DiT 还是 ViT，和 LLM 的输出原理有什么不同</a>
             <a href="#hunyuan3d-training-data-latents">05 · 训练时输入是图片输出是 latents 吗，训练数据集怎么构造</a>
+            <a href="#hunyuan3d-complete-pipeline-vs-llm">06 · 完整 pipeline 是什么，和 LLM 最不一样的地方在哪里</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -7307,6 +7308,101 @@ loss = MSE(model_output, ut)
 
           <div class="callout">最短结论：<strong>你的理解基本正确，但要把“输出 latent”改成“用真实 3D 生成 clean latent 作为 diffusion/flow 监督”。</strong>数据集确实是一份 3D asset 派生多张 2D 条件渲染图；这种设计让模型在训练阶段学到视角不变性和多视角一致性。</div>
           <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2.1</code>，commit <code class="inline">82920d6</code>。关键文件：<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/configs/hunyuandit-finetuning-flowmatching-dinol518-bf16-lr1e5-4096.yaml</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/data/dit_asl.py:133-285</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/flow_matching_sit.py:256-289</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/transport.py:158-183</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/autoencoders/model.py:324-334</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-complete-pipeline-vs-llm">
+          <div class="section-header"><div class="index">HY3D6</div><h2>完整 pipeline 是什么，和 LLM 最不一样的地方在哪里</h2></div>
+          <p>混元3D 的完整 pipeline 不是“模型直接吐出一个 3D 文件”。它更像一条<strong>多阶段生成流水线</strong>：先把 2D 图片变成条件特征，再在 3D shape latent 空间做 flow matching 采样，然后把 latent 解码成 mesh，最后可选做 UV 和纹理生成，导出 GLB。</p>
+          <div class="callout"><strong>一句话：</strong>LLM 的 pipeline 是“文本 token → 下一个 token → 拼接文本”；混元3D 是“图片条件 → 3D latent 迭代去噪 → ShapeVAE 解码 → volume/surface extraction → mesh → 多视角纹理 → UV bake → GLB”。核心差异是：LLM 输出离散 token，混元3D 输出连续 3D latent，并依赖后处理组件把 latent 变成真实 3D 资产。</div>
+
+          <p>完整推理 pipeline 可以按 9 步记：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>输入图片。</strong>用户给一张 RGBA/RGB 物体图。demo 里如果是 RGB，会先用 <code class="inline">BackgroundRemover</code> 去背景，减少背景对 3D 主体的干扰。</div>
+            <div class="flow-step" data-step="2"><strong>图片预处理。</strong><code class="inline">image_processor</code> / <code class="inline">prepare_image()</code> 把图片居中、缩放、转 tensor，得到模型能吃的 image 和 mask。</div>
+            <div class="flow-step" data-step="3"><strong>图片条件编码。</strong><code class="inline">conditioner</code> 用 DINO/CLIP 这类 ViT-style image encoder 把 2D 图编码成 condition tokens。这里相当于“看懂输入图”，不是生成 3D。</div>
+            <div class="flow-step" data-step="4"><strong>初始化 3D shape latent 噪声。</strong><code class="inline">prepare_latents()</code> 根据 <code class="inline">ShapeVAE.latent_shape</code> 创建随机 latent。这个 latent 是连续向量，不是文本 token，也不是 mesh 顶点。</div>
+            <div class="flow-step" data-step="5"><strong>DiT / flow matching 采样。</strong><code class="inline">Hunyuan3DDiTFlowMatchingPipeline</code> 按 timesteps 循环：把 noisy latent、timestep、image condition 送入 <code class="inline">Hunyuan3DDiT</code>，模型预测 velocity/noise 更新方向。</div>
+            <div class="flow-step" data-step="6"><strong>Scheduler 更新 latent。</strong>每一步用 <code class="inline">scheduler.step(noise_pred, t, latents)</code> 更新整块 shape latent。采样结束后得到比较干净的 3D shape latent。</div>
+            <div class="flow-step" data-step="7"><strong>ShapeVAE 解码。</strong><code class="inline">_export()</code> 里先做 <code class="inline">self.vae(latents)</code>，把 latent 变成几何 decoder 可用的隐表示。</div>
+            <div class="flow-step" data-step="8"><strong>volume decoder + surface extractor。</strong><code class="inline">latents2mesh()</code> 先得到 volume grid logits，再通过 marching cubes / surface extractor 抽取三角面，输出 <code class="inline">trimesh</code>。</div>
+            <div class="flow-step" data-step="9"><strong>纹理阶段和导出。</strong>如果启用 Paint pipeline，会给 mesh 做 UV wrap，渲染多视角 normal/position，生成多视角纹理并 bake 回 UV，最后导出 <code class="inline">demo.glb</code>。</div>
+          </div>
+
+          <pre><code>Hunyuan3D 推理主链路：
+image
+  -> image_processor / mask
+  -> DINO or CLIP conditioner
+  -> random shape latent
+  -> Hunyuan3D-DiT + scheduler 多步 flow matching
+  -> clean shape latent
+  -> ShapeVAE
+  -> volume decoder
+  -> surface extractor / marching cubes
+  -> mesh
+  -> optional Paint: multiview texture + UV bake
+  -> GLB</code></pre>
+
+          <p>和 LLM 最不一样的地方，可以按这张对照表记：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>LLM：离散 token 自回归</h3>
+              <p>LLM 输入 token ids，Transformer 输出词表 logits。采样器从词表里选一个 token，再把这个 token 追加到上下文里，继续预测下一个 token。</p>
+              <pre><code>tokens -> Transformer -> vocab logits -> sample next token
+输出空间：离散词表
+循环方式：一个 token 一个 token 往后接</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>混元3D：连续 latent 迭代去噪</h3>
+              <p>混元3D 输入的是 noisy shape latent，不输出词表概率，而是输出同形状的连续向量，用来更新整个 3D latent。</p>
+              <pre><code>noisy latent + timestep + image condition
+  -> DiT -> velocity/noise prediction
+  -> scheduler updates whole latent
+输出空间：连续 3D shape latent
+循环方式：整块 latent 多步 refinement</code></pre>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>差异 1：输入不是纯文本上下文</h3>
+              <p>LLM 的核心输入是文本 token 序列；混元3D 的核心输入是 2D 图片条件 + 当前 3D latent + timestep。图片 encoder 只是条件入口，真正生成发生在 shape latent 空间。</p>
+            </article>
+            <article class="mini-card">
+              <h3>差异 2：模型输出不是最终资产</h3>
+              <p>LLM 输出 token 后，人可以直接读；混元3D-DiT 输出的 latent 更新量不能直接打开。必须经过 scheduler、VAE、volume decoder、surface extractor 才能变成 mesh。</p>
+            </article>
+            <article class="mini-card">
+              <h3>差异 3：没有“下一个顶点”生成</h3>
+              <p>它不是 autoregressive 地生成第 1 个顶点、第 2 个顶点、第 3 个面片。它是在一个固定形状的 latent tensor 上反复去噪，最后一次性解码成完整 mesh。</p>
+            </article>
+            <article class="mini-card">
+              <h3>差异 4：输出需要几何算法参与</h3>
+              <p>LLM 后处理主要是 detokenize；混元3D 后处理包含 volume decoding、marching cubes / surface extraction、mesh simplification/cleanup、UV baking、纹理 inpaint，这些都是非 LLM 式的几何/图形组件。</p>
+            </article>
+          </div>
+
+          <p>源码上对应的关键组件：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>Conditioner</h3>
+              <p><code class="inline">hy3dgen/shapegen/models/conditioner.py</code> 里的 <code class="inline">CLIPImageEncoder</code> / <code class="inline">DinoImageEncoder</code> 把输入图片转成 condition tokens。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Hunyuan3DDiT</h3>
+              <p><code class="inline">hunyuan3ddit.py</code> 里的 <code class="inline">Hunyuan3DDiT.forward()</code> 处理 latent、timestep、contexts，最后 <code class="inline">final_layer</code> 输出 latent 更新预测。</p>
+            </article>
+            <article class="mini-card">
+              <h3>ShapeVAE</h3>
+              <p><code class="inline">ShapeVAE</code> 负责 3D latent 和几何表征之间的转换。它不是语言模型 head，而是 3D 几何 decoder 的入口。</p>
+            </article>
+            <article class="mini-card">
+              <h3>Paint pipeline</h3>
+              <p><code class="inline">Hunyuan3DPaintPipeline</code> 对 mesh 做 UV、渲染多视角结构图、多视角纹理生成、back project 和 bake，最终给 mesh 贴图。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短总结：<strong>混元3D 的完整 pipeline 是生成模型 + 几何解码器 + 图形渲染/纹理系统的组合。</strong>它和 LLM 最大不同不是“输入是不是图片”，而是输出机制：LLM 的输出头接词表；混元3D 的 DiT 输出连续 latent 更新量，最终 3D 文件由 VAE、surface extraction 和 texture baking 这些组件共同产出。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/minimal_demo.py</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:473-488</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:740-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:650-668</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py:270-410</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:158-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:190-240</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
