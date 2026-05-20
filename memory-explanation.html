@@ -1063,7 +1063,7 @@
         <details class="toc-group" id="claudeToolsTocGroup" open>
           <summary>
             <span class="toc-group-title">Claude Code 的工具调用</span>
-            <span class="toc-count">7 sections</span>
+            <span class="toc-count">8 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#claude-tools-overview-scheduling-recovery">01 · Claude Code 有哪些工具，怎么调度、纠错，失败怎么自动恢复</a>
@@ -1073,6 +1073,7 @@
             <a href="#claude-tools-deep-dive-source-patterns">05 · Claude Code 十几个工具源码详解：怎么写、怎么优化</a>
             <a href="#claude-tools-grep-glob-read-layered-limits">06 · Claude Code 的 Grep / Glob / Read 等工具具体有哪些，读取限制和分层读取怎么做</a>
             <a href="#claude-tools-readfilestate-staleness-batched-read">07 · FileReadState 怎么管理文件是否改过，以及全量读取是否分批</a>
+            <a href="#claude-tools-permission-layers-deep-dive">08 · Claude Code 的权限机制有几层，操作是怎么一层层通过权限的</a>
           </div>
         </details>
         <details class="toc-group" id="toolsTocGroup">
@@ -10336,6 +10337,121 @@ Read({ file_path: "/repo/src/services/tools/toolExecution.ts", offset: 120, limi
 
           <div class="callout">最短总结：<strong>readFileState = LRU 的文件快照账本。</strong>Read/Write/Edit 更新账本；Edit/Write 用账本的 mtime 和 content 防止 stale write；大文件不是自动全量读，而是通过 Grep/Glob 定位后用 offset/limit 分批读必要范围。</div>
           <div class="refs">参考文件：<code class="inline">src/utils/fileStateCache.ts</code>、<code class="inline">src/tools/FileReadTool/FileReadTool.ts</code>、<code class="inline">src/tools/FileEditTool/FileEditTool.ts</code>、<code class="inline">src/tools/FileWriteTool/FileWriteTool.ts</code>、<code class="inline">src/tools/BashTool/BashTool.tsx</code>、<code class="inline">src/utils/queryHelpers.ts</code>、<code class="inline">src/utils/attachments.ts</code>、<code class="inline">src/utils/readFileInRange.ts</code>、<code class="inline">src/cli/print.ts</code>。</div>
+        </section>
+
+
+        <section class="section reveal" id="claude-tools-permission-layers-deep-dive">
+          <div class="section-header"><div class="index">CT8</div><h2>Claude Code 的权限机制有几层，操作是怎么一层层通过权限的</h2></div>
+          <p>我读的是服务器里的 Claude Code 源码：核心链路在 <code class="inline">src/services/tools/toolExecution.ts</code>、<code class="inline">src/utils/permissions/permissions.ts</code>、<code class="inline">src/hooks/useCanUseTool.tsx</code>。结论先说：Claude Code 的权限不是一个简单 if，而是<strong>工具执行前的多级闸门</strong>。</p>
+          <div class="callout"><strong>怎么数层？</strong>如果只数“真正决定能不能执行 tool.call() 的执行前闸门”，可以记成 <strong>8 层</strong>。如果把“工具是否暴露给模型”和“执行后审计/Hook”也算进完整生命周期，就是 <strong>10 个阶段</strong>。</div>
+
+          <div class="flow">
+            <div class="flow-step" data-step="0"><strong>工具暴露层：</strong>会话组装工具池时先决定模型能看到哪些工具 schema。看不到的工具，模型通常就不会发起对应 <code class="inline">tool_use</code>。</div>
+            <div class="flow-step" data-step="1"><strong>Schema 层：</strong><code class="inline">checkPermissionsAndCallTool()</code> 先执行 <code class="inline">tool.inputSchema.safeParse(input)</code>。字段名、类型、未知字段不对，直接返回 <code class="inline">InputValidationError</code>，还没进入权限判断。</div>
+            <div class="flow-step" data-step="2"><strong>工具语义校验层：</strong>每个工具自己的 <code class="inline">validateInput()</code> 检查业务前提，例如 Edit 的 <code class="inline">old_string</code> 不能等于 <code class="inline">new_string</code>、文件不能太大、Write/Edit 不能写入被 deny 的目录。</div>
+            <div class="flow-step" data-step="3"><strong>PreToolUse Hook 层：</strong><code class="inline">runPreToolUseHooks()</code> 可以追加上下文、修改输入、阻止继续，甚至给出 hook permission result。随后 <code class="inline">resolveHookPermissionDecision()</code> 把 Hook 决策合并进正常权限流。</div>
+            <div class="flow-step" data-step="4"><strong>工具专属权限层：</strong><code class="inline">tool.checkPermissions()</code>。Bash 会解析命令、拆 subcommand、检查 deny/ask/allow 规则、路径约束、注入风险、sandbox auto allow；Read/Edit/Write 会走读写路径规则、工作目录、敏感文件检查。</div>
+            <div class="flow-step" data-step="5"><strong>通用规则层：</strong><code class="inline">hasPermissionsToUseToolInner()</code> 统一处理整工具 deny、整工具 ask、工具专属结果、bypass 免疫的 safety check、allow rules。核心返回只有三种：<code class="inline">allow</code>、<code class="inline">deny</code>、<code class="inline">ask</code>。</div>
+            <div class="flow-step" data-step="6"><strong>权限模式层：</strong><code class="inline">default</code>、<code class="inline">acceptEdits</code>、<code class="inline">plan</code>、<code class="inline">dontAsk</code>、<code class="inline">bypassPermissions</code>、内部 <code class="inline">auto</code> 改变 ask/allow 的策略。例如 <code class="inline">dontAsk</code> 会把 ask 转 deny；<code class="inline">bypassPermissions</code> 也不能绕过显式 deny 和安全检查。</div>
+            <div class="flow-step" data-step="7"><strong>自动化增强层：</strong>auto mode / Bash classifier / speculative classifier / sandbox auto allow / denial tracking。它们用于减少弹窗，但高风险 safety check、PowerShell 等场景仍会保守地要求显式批准或拒绝。</div>
+            <div class="flow-step" data-step="8"><strong>决策执行层：</strong><code class="inline">useCanUseTool()</code> 处理 allow/deny/ask。allow 才进入 <code class="inline">tool.call()</code>；deny 或未批准的 ask 会生成 error tool_result；ask 可能进入本地交互、Bridge、Channel、Coordinator、Swarm worker leader approval。</div>
+            <div class="flow-step" data-step="9"><strong>执行后层：</strong>工具执行成功/失败后还有 PostToolUse、failure hook、PermissionDenied hook、telemetry。这不是执行前授权，但属于完整安全生命周期。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>源码里的主入口</h3>
+              <p><code class="inline">toolExecution.ts</code> 的 <code class="inline">checkPermissionsAndCallTool()</code> 是工具调用总门卫：先 schema，再 <code class="inline">validateInput()</code>，再 PreToolUse，之后调用 <code class="inline">canUseTool</code>，最后只有 <code class="inline">permissionDecision.behavior === 'allow'</code> 才会继续执行工具。</p>
+            </article>
+            <article class="mini-card">
+              <h3>真正的权限判断函数</h3>
+              <p><code class="inline">permissions.ts</code> 的 <code class="inline">hasPermissionsToUseToolInner()</code> 做规则优先级：deny 最前；整工具 ask 次之；工具自己的 <code class="inline">checkPermissions()</code> 再判断内容级规则；safety check 对 bypass 免疫；然后才看 bypass / allow rule；最后 passthrough 变成 ask。</p>
+            </article>
+            <article class="mini-card">
+              <h3>ask 不是一个结果，而是一组审批通道</h3>
+              <p><code class="inline">useCanUseTool.tsx</code> 收到 ask 后，会按上下文选择处理器：coordinator worker 先跑自动检查；swarm worker 可以把权限请求通过 mailbox 发给 leader；主交互路径会进入 <code class="inline">handleInteractivePermission()</code>，本地 UI、CCR bridge、外部 channel、PermissionRequest hook、Bash classifier 谁先决策谁赢。</p>
+            </article>
+            <article class="mini-card">
+              <h3>权限规则从哪里来</h3>
+              <p>规则源包括 <code class="inline">userSettings</code>、<code class="inline">projectSettings</code>、<code class="inline">localSettings</code>、<code class="inline">flagSettings</code>、<code class="inline">policySettings</code>、<code class="inline">cliArg</code>、<code class="inline">command</code>、<code class="inline">session</code>。用户点“本次允许 / 总是允许”时，本质是在生成 <code class="inline">PermissionUpdate</code> 并写回对应目的地。</p>
+            </article>
+          </div>
+
+          <pre><code>// src/services/tools/toolExecution.ts，简化后的执行前主链路
+const parsedInput = tool.inputSchema.safeParse(input)
+if (!parsedInput.success) return InputValidationError
+
+const valid = await tool.validateInput?.(parsedInput.data, context)
+if (valid?.result === false) return tool_result_error
+
+for await (const r of runPreToolUseHooks(context, tool, parsedInput.data, toolUseID)) {
+  // hook 可以 stop、追加上下文、更新 input、返回 hookPermissionResult
+}
+
+const resolved = await resolveHookPermissionDecision(
+  hookPermissionResult,
+  tool,
+  processedInput,
+  context,
+  canUseTool,
+  assistantMessage,
+  toolUseID,
+)
+
+if (resolved.decision.behavior !== 'allow') {
+  return permission_denied_tool_result
+}
+
+return await tool.call(resolved.input, context)</code></pre>
+
+          <pre><code>// src/utils/permissions/permissions.ts，简化后的权限优先级
+if (denyRuleForWholeTool) return deny
+if (askRuleForWholeTool && !sandboxAutoAllow) return ask
+
+const toolPermissionResult = await tool.checkPermissions(parsedInput, context)
+if (toolPermissionResult.behavior === 'deny') return deny
+if (tool.requiresUserInteraction?.() && toolPermissionResult.behavior === 'ask') return ask
+if (contentAskRule || safetyCheck) return ask   // bypass 也不能绕过
+
+if (mode === 'bypassPermissions') return allow
+if (alwaysAllowedRule) return allow
+
+return toolPermissionResult.behavior === 'passthrough'
+  ? ask
+  : toolPermissionResult</code></pre>
+
+          <h3>案例 1：Bash(<code class="inline">rm -rf build</code>) 怎么过权限</h3>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>Schema：</strong>确认 input 有 <code class="inline">command</code> 字符串；模型如果传错字段，直接失败。</div>
+            <div class="flow-step" data-step="2"><strong>PreToolUse：</strong>项目 Hook 可以先拦截或改写命令。</div>
+            <div class="flow-step" data-step="3"><strong>Bash 专属检查：</strong><code class="inline">bashToolHasPermission()</code> 解析 AST / legacy parser，检查命令注入、operator、subcommand、输出重定向、<code class="inline">cd + git</code> 这类特殊风险。</div>
+            <div class="flow-step" data-step="4"><strong>规则匹配：</strong>如果有 <code class="inline">Bash(rm:*)</code> deny，直接 deny；如果 ask，则进入审批；如果 allow 且没有更高优先级风险，才可能放行。</div>
+            <div class="flow-step" data-step="5"><strong>自动化：</strong>开启 sandbox auto allow 时，沙箱内命令可以减少确认；但显式 deny/ask 仍优先，复杂或危险命令仍会问。</div>
+            <div class="flow-step" data-step="6"><strong>最后决策：</strong>ask 进入 UI / bridge / channel / swarm leader；用户允许后可能生成 session 或 settings 规则，下次同类命令可直接通过。</div>
+          </div>
+
+          <h3>案例 2：Edit 文件怎么过权限</h3>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>Schema + validateInput：</strong>检查 <code class="inline">file_path</code>、<code class="inline">old_string</code>、<code class="inline">new_string</code>；拒绝 old/new 一样、超大文件、密钥写入、被 deny 的路径。</div>
+            <div class="flow-step" data-step="2"><strong>读前置状态：</strong>Edit/Write 还会依赖 <code class="inline">readFileState</code>，避免模型没读过文件或基于旧 mtime 覆盖用户新改动。</div>
+            <div class="flow-step" data-step="3"><strong>写权限：</strong><code class="inline">checkWritePermissionForTool()</code> 先查 edit deny；再查 internal editable path；再做 <code class="inline">.claude</code>、<code class="inline">.git</code>、shell config、Windows 可疑路径等 safety check。</div>
+            <div class="flow-step" data-step="4"><strong>工作目录与规则：</strong><code class="inline">acceptEdits</code> 且路径在 allowed working dir 内可自动 allow；否则看 edit allow/ask rule；没有规则就 ask。</div>
+            <div class="flow-step" data-step="5"><strong>执行：</strong>只有 allow 后才真正写磁盘；写完会更新 <code class="inline">readFileState</code>，否则返回拒绝信息给模型重新规划。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么要这么多层</h3>
+              <p>不同层防的问题不同：Schema 防模型参数乱写；validateInput 防明显业务错误；Hook 给企业/项目策略插入口；工具专属权限懂 Bash/File 的真实风险；通用规则保证用户设置统一生效；模式层决定交互策略；classifier/sandbox 降低频繁确认；审批层把最终控制权交给人或上级 agent。</p>
+            </article>
+            <article class="mini-card">
+              <h3>最容易误解的点</h3>
+              <p><code class="inline">bypassPermissions</code> 不是“所有安全都关闭”。源码在 deny、工具专属 deny、content ask rule、safety check 之后才处理 bypass，所以显式 deny 和部分安全检查仍然比 bypass 更高优先级。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短记忆法：<strong>Claude Code 权限链路 = 先挡格式，再挡业务，再过 Hook，再问工具自己，再过全局规则和模式，最后进入人/自动化审批；只有 allow 才能 tool.call()。</strong></div>
+          <div class="refs">参考文件：<code class="inline">src/services/tools/toolExecution.ts</code>、<code class="inline">src/utils/permissions/permissions.ts</code>、<code class="inline">src/types/permissions.ts</code>、<code class="inline">src/hooks/useCanUseTool.tsx</code>、<code class="inline">src/hooks/toolPermission/PermissionContext.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/interactiveHandler.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/coordinatorHandler.ts</code>、<code class="inline">src/hooks/toolPermission/handlers/swarmWorkerHandler.ts</code>、<code class="inline">src/tools/BashTool/bashPermissions.ts</code>、<code class="inline">src/tools/FileEditTool/FileEditTool.ts</code>、<code class="inline">src/tools/FileWriteTool/FileWriteTool.ts</code>、<code class="inline">src/utils/permissions/filesystem.ts</code>。</div>
         </section>
 
 
