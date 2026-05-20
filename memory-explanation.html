@@ -1004,10 +1004,11 @@
         <details class="toc-group" id="hunyuan3dTocGroup" open>
           <summary>
             <span class="toc-group-title">混元3D</span>
-            <span class="toc-count">1 section</span>
+            <span class="toc-count">2 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
+            <a href="#hunyuan3d-view-consistency">02 · 混元3D 是怎么确保生成的 3D 模型每个视角都一致的</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -6962,6 +6963,86 @@ mesh.export('demo.glb')</code></pre>
 
           <div class="callout">最短总结：<strong>Hunyuan3D-2 = 图片到 3D 资产的完整生成工程。</strong>主线是“图片条件 → DiT/flow matching 生成 shape latent → ShapeVAE 解码成 mesh → Paint 多视角生成纹理 → bake 到 UV → 导出 GLB”。</div>
           <div class="refs">本地源码：<code class="inline">/root/Hunyuan3D-2</code>。参考文件：<code class="inline">README.md:72-99</code>、<code class="inline">README.md:124-160</code>、<code class="inline">README.md:190-216</code>、<code class="inline">minimal_demo.py</code>、<code class="inline">hy3dgen/shapegen/pipelines.py:94-220</code>、<code class="inline">hy3dgen/shapegen/pipelines.py:552-777</code>、<code class="inline">hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py:268-384</code>、<code class="inline">hy3dgen/shapegen/models/autoencoders/model.py:120-180</code>、<code class="inline">hy3dgen/texgen/pipelines.py:53-227</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-view-consistency">
+          <div class="section-header"><div class="index">HY3D2</div><h2>混元3D 是怎么确保生成的 3D 模型每个视角都一致的</h2></div>
+          <p>这个问题的关键是：<strong>混元3D 不是从一张 2D 图分别生成正面图、侧面图、背面图，再把这些图硬拼成 3D。</strong>它先生成一个统一的 3D shape latent，再解码成一个真实 mesh。只要最后是同一个 mesh，从不同角度看天然就是同一个几何体。</p>
+          <div class="callout"><strong>一句话：</strong>几何一致性靠“单一 3D latent → 单一 mesh”保证；纹理一致性靠“同一个 mesh 渲染多视角 normal/position 条件 → 多视角纹理扩散 → bake 回同一个 UV texture”保证。2D 输入只提供可见面条件，不可见面由模型学到的 3D 先验补全。</div>
+
+          <p>先把“每个视角一致”拆成两个层面：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 几何一致性</h3>
+              <p>几何一致性指从前、后、左、右看，模型的形状是同一个 3D 物体：头、身体、轮廓、厚度、拓扑不能互相矛盾。混元3D 通过 shape latent 和 ShapeVAE 生成统一 mesh，而不是逐视角生成多张深度图。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 纹理一致性</h3>
+              <p>纹理一致性指颜色、图案、材质在不同视角接缝处不要乱跳。混元3D-Paint 不是把六张图直接贴上去，而是把多视角生成结果投影、加权、融合到一个 UV texture 上。</p>
+            </article>
+          </div>
+
+          <p>几何阶段为什么能从 2D 图变成相对一致的 3D？源码链路是：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>输入图片只是条件。</strong><code class="inline">prepare_image()</code> 预处理图片，<code class="inline">encode_cond()</code> 用 conditioner 把图片编码成条件向量。图片不是输出空间本身，而是控制 shape latent 采样的条件。</div>
+            <div class="flow-step" data-step="2"><strong>初始化一个 3D shape latent。</strong><code class="inline">prepare_latents()</code> 用 <code class="inline">self.vae.latent_shape</code> 创建随机 latent。这个 latent 是整个 3D 形状的隐空间表示，不是某一个视角。</div>
+            <div class="flow-step" data-step="3"><strong>DiT 在 latent 空间整体去噪。</strong><code class="inline">Hunyuan3DDiTFlowMatchingPipeline.__call__()</code> 逐 timestep 调 <code class="inline">self.model(latent_model_input, timestep, cond)</code>，再由 scheduler 更新同一个 <code class="inline">latents</code>。</div>
+            <div class="flow-step" data-step="4"><strong>ShapeVAE 解码成统一空间场。</strong><code class="inline">ShapeVAE</code> 里的 <code class="inline">latents2mesh()</code> 先做 volume decoding 得到 <code class="inline">grid_logits</code>，再做 surface extraction 提取表面。</div>
+            <div class="flow-step" data-step="5"><strong>最终输出一个 mesh。</strong>mesh 是一个顶点/面片集合。你从任何角度看，看的都是同一套顶点和面，所以几何不会出现“正面一个物体、侧面另一个物体”的逐图矛盾。</div>
+          </div>
+
+          <pre><code>几何一致性核心链路：
+2D image
+  -> conditioner 编码成条件
+  -> DiT/flow matching 生成一个 shape latent
+  -> ShapeVAE volume decoding
+  -> surface extraction / marching cubes
+  -> single mesh
+  -> 任意视角渲染都来自同一个 mesh</code></pre>
+
+          <p>纹理阶段为什么也尽量保持多视角一致？源码链路是：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>先固定 mesh。</strong><code class="inline">Hunyuan3DPaintPipeline.__call__()</code> 先对已经生成的 mesh 做 <code class="inline">mesh_uv_wrap(mesh)</code>，然后 <code class="inline">self.render.load_mesh(mesh)</code>。也就是说纹理阶段不再改变几何主体。</div>
+            <div class="flow-step" data-step="2"><strong>从同一个 mesh 渲染多视角结构条件。</strong>源码固定候选相机角度：0、90、180、270、顶视、底视，然后渲染 <code class="inline">normal_maps</code> 和 <code class="inline">position_maps</code>。这些图来自同一个 mesh，因此天然共享同一套 3D 坐标。</div>
+            <div class="flow-step" data-step="3"><strong>多视角纹理模型一起生成视角图。</strong><code class="inline">multiview_model</code> 接收参考图片、normal/position 条件、camera_info，生成多个视角的纹理图。UNet 模块里有 <code class="inline">attn_multiview</code> 和 <code class="inline">attn_refview</code>，用于视角之间和参考图之间的信息交互。</div>
+            <div class="flow-step" data-step="4"><strong>投影回统一 UV。</strong><code class="inline">bake_from_multiview()</code> 把每个视角的生成图通过 <code class="inline">render.back_project()</code> 投回 UV 空间，再按视角权重和 cos map 做融合。</div>
+            <div class="flow-step" data-step="5"><strong>补洞和保存。</strong>投影后没覆盖到的位置用 <code class="inline">texture_inpaint()</code> 做 UV inpaint，最后 <code class="inline">self.render.set_texture(texture)</code> 写回 mesh。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么 normal / position map 有用</h3>
+              <p>normal map 告诉纹理模型这个视角下表面朝向，position map 告诉它像素对应的 3D 位置。这样模型生成侧面/背面纹理时，不是凭空画 2D 图，而是在同一个 3D 结构约束下画。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么要 bake 回 UV</h3>
+              <p>如果只保留多张视角图，切换视角时可能接不上。bake 的意义是把多个视角的颜色融合成一张统一 UV 纹理；渲染时无论从哪个相机看，都从同一张贴图采样。</p>
+            </article>
+            <article class="mini-card">
+              <h3>多视角 attention 解决什么</h3>
+              <p><code class="inline">attn_multiview</code> 让多个生成视角之间的信息能互相看见，减少“正面衣服是红色，侧面突然变蓝色”这类不一致；<code class="inline">attn_refview</code> 则把输入参考图的外观信息传给生成视角。</p>
+            </article>
+            <article class="mini-card">
+              <h3>相机权重为什么不一样</h3>
+              <p>配置里正面权重更高，侧面/背面/上下视角权重更低。直观理解：输入图通常更可靠地描述正面，背面和底部更多依赖模型先验，所以融合时不能让不可靠视角过度污染整体贴图。</p>
+            </article>
+          </div>
+
+          <p>但必须说清楚：<strong>单张 2D 图不可能数学上唯一确定 3D。</strong>比如一张正面玩偶图，背面长什么样、尾巴是否存在、衣服后面有没有图案，图片里没有信息。混元3D 的做法不是“知道真相”，而是用训练中学到的 3D 资产先验做合理补全。</p>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>它能保证什么</h3>
+              <p>它能保证输出是一个统一 mesh，纹理也尽量合并到统一 UV；因此从任意视角渲染出来不会是彼此独立的几张图，而是同一个 3D 对象的不同投影。</p>
+            </article>
+            <article class="mini-card">
+              <h3>它不能保证什么</h3>
+              <p>它不能保证不可见背面一定和真实物体完全一致。对于单图不可见区域，模型只能根据类别、形状先验、对称性和参考图风格去猜。输入越遮挡、越非典型，背面幻觉风险越高。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短记忆：<strong>一致性不是因为 2D 图包含所有视角，而是因为输出被约束成“同一个 3D 对象”。</strong>形状阶段输出单一 mesh；纹理阶段多视角生成只是中间步骤，最终仍 bake 到同一个 UV texture。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:424-510</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:700-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:171-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:198-275</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:33-50</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:110-146</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:190-240</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:55-79</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:176-235</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:502-580</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
