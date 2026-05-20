@@ -1004,12 +1004,13 @@
         <details class="toc-group" id="hunyuan3dTocGroup" open>
           <summary>
             <span class="toc-group-title">混元3D</span>
-            <span class="toc-count">3 sections</span>
+            <span class="toc-count">4 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
             <a href="#hunyuan3d-view-consistency">02 · 混元3D 是怎么确保生成的 3D 模型每个视角都一致的</a>
             <a href="#hunyuan3d-training-view-consistency">03 · 训练阶段怎么让 2D 输入学会生成多视角一致的 3D</a>
+            <a href="#hunyuan3d-dit-vit-llm-output">04 · 项目用的是 DiT 还是 ViT，和 LLM 的输出原理有什么不同</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -7130,6 +7131,91 @@ mesh.export('demo.glb')</code></pre>
 
           <div class="callout">最短总结：<strong>训练阶段的一致性来自监督数据和目标空间。</strong>2D 图只是条件；训练答案是完整 3D asset 的 latent/mesh 和同一 mesh 的多视角纹理。模型学到的是“从可见 2D 证据 + 大规模 3D 先验，生成一个统一 3D 对象”。这能保证合理一致，但不能保证不可见背面一定等于真实物体背面。</div>
           <div class="refs">参考源码/资料：<code class="inline">/root/Hunyuan3D-2/README.md:39</code>、<code class="inline">/root/Hunyuan3D-2/README.md:56</code>、<code class="inline">/root/Hunyuan3D-2/assets/report/Tencent_Hunyuan3D_2_0.pdf</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:424-510</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:700-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:171-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:198-275</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:33-50</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/pipelines.py:110-146</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:55-79</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/texgen/hunyuanpaint/unet/modules.py:176-235</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-dit-vit-llm-output">
+          <div class="section-header"><div class="index">HY3D4</div><h2>项目用的是 DiT 还是 ViT，和 LLM 的输出原理有什么不同</h2></div>
+          <p>结论先说：<strong>混元3D 的 3D 形状生成主干是 DiT，不是普通 ViT；但它的图片条件编码器里会用 CLIP / DINOv2 这类 ViT-style 图像 encoder。</strong>所以准确说法是：<strong>ViT 类模型负责编码输入图片条件，DiT 负责在 3D shape latent 空间做生成。</strong></p>
+          <div class="callout"><strong>一句话：</strong>LLM 输出的是下一个离散 token 的 logits；Hunyuan3D-DiT 输出的是连续 shape latent 的 denoising / flow 更新量。这个更新量还不是 mesh，必须经过 scheduler 迭代更新 latent，再由 ShapeVAE、volume decoder、surface extractor 才变成 3D mesh。</div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>1. 为什么叫 DiT</h3>
+              <p>DiT = Diffusion Transformer。它本质上是 Transformer，但用在 diffusion / flow matching 的去噪过程里。源码里的类名就是 <code class="inline">Hunyuan3DDiT</code>，pipeline 入口是 <code class="inline">Hunyuan3DDiTFlowMatchingPipeline</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>2. 为什么又看到 ViT</h3>
+              <p>ViT 是图像编码器范式。混元3D 的 <code class="inline">conditioner.py</code> 里有 <code class="inline">CLIPImageEncoder</code>、<code class="inline">DinoImageEncoder</code>、<code class="inline">DinoImageEncoderMV</code>。这些负责把 2D 图片变成条件 token，不是最终生成 mesh 的主干。</p>
+            </article>
+            <article class="mini-card">
+              <h3>3. DiT 和 ViT 的关系</h3>
+              <p>DiT 借用了 Transformer/ViT 的 token + attention + MLP 结构，但任务不同。ViT 常用于图像理解/分类/特征提取；DiT 用 Transformer 当扩散模型 denoiser，每一步输入 noisy latent 和 timestep，输出去噪方向。</p>
+            </article>
+            <article class="mini-card">
+              <h3>4. 这里不是 autoregressive decoder</h3>
+              <p>LLM decoder 一次预测下一个 token；Hunyuan3D-DiT 每一步预测整个 shape latent 的更新量。它不是“先生成第一个顶点，再生成第二个顶点”，而是在连续 latent 空间里整体迭代。</p>
+            </article>
+          </div>
+
+          <p>从源码看，shape 生成的关键模块是：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>图片条件 encoder。</strong><code class="inline">prepare_image()</code> 预处理图片，<code class="inline">encode_cond()</code> 调用 conditioner。conditioner 内部可用 CLIP / DINOv2 图像 encoder 输出 <code class="inline">contexts['main']</code>。</div>
+            <div class="flow-step" data-step="2"><strong>随机 shape latent。</strong><code class="inline">prepare_latents()</code> 根据 <code class="inline">self.vae.latent_shape</code> 创建随机连续 latent，形状是 <code class="inline">(batch_size, num_latents, embed_dim)</code>。</div>
+            <div class="flow-step" data-step="3"><strong>DiT denoiser。</strong><code class="inline">Hunyuan3DDiT.forward(x, t, contexts)</code> 把 noisy latent 经 <code class="inline">latent_in</code> 投影，把 timestep 经 <code class="inline">time_in</code> 编码，把图片条件经 <code class="inline">cond_in</code> 投影。</div>
+            <div class="flow-step" data-step="4"><strong>双流/单流 Transformer blocks。</strong>源码先跑 <code class="inline">double_blocks</code>，让 latent token 和 condition token 交互；再把 condition 和 latent 拼起来跑 <code class="inline">single_blocks</code>。</div>
+            <div class="flow-step" data-step="5"><strong>final_layer 输出 latent 更新量。</strong><code class="inline">LastLayer</code> 用 LayerNorm + adaLN modulation + Linear，把 hidden state 投回 <code class="inline">out_channels</code>。源码里 <code class="inline">out_channels = in_channels</code>，也就是输出维度对齐 shape latent 维度。</div>
+            <div class="flow-step" data-step="6"><strong>scheduler 更新 latent。</strong>pipeline 里 <code class="inline">noise_pred = self.model(...)</code> 后，不是直接得到 mesh，而是调用 <code class="inline">self.scheduler.step(noise_pred, t, latents)</code>，把 latent 推进一步。</div>
+            <div class="flow-step" data-step="7"><strong>ShapeVAE 输出 mesh。</strong>采样完成后 <code class="inline">_export()</code> 调 <code class="inline">self.vae(latents)</code> 和 <code class="inline">self.vae.latents2mesh()</code>，再由 volume decoder + surface extractor 变成 mesh。</div>
+          </div>
+
+          <p>和 LLM 对比，输出原理差异非常大：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>LLM 输出：token logits</h3>
+              <p>典型 LLM 输入 token ids，Transformer decoder 输出每个词表 token 的 logits。采样器从 softmax 概率里选下一个 token，然后把 token append 回上下文继续生成。</p>
+              <pre><code>context tokens -> Transformer -> vocab logits -> sample token
+循环单位：一个离散文本 token</code></pre>
+            </article>
+            <article class="mini-card">
+              <h3>Hunyuan3D 输出：latent 更新量</h3>
+              <p>Hunyuan3D-DiT 输入 noisy shape latent、timestep、图片条件，输出与 latent 同形状的连续向量。这个向量是 scheduler 用来更新 latent 的 denoising / flow 预测，不是词表概率。</p>
+              <pre><code>noisy shape latent + timestep + image condition
+  -> DiT
+  -> noise_pred / velocity-like update
+  -> scheduler.step 更新 latent</code></pre>
+            </article>
+          </div>
+
+          <p>最终“输出组件”不是一个，而是一条链：</p>
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>组件 A：Hunyuan3DDiT.final_layer</h3>
+              <p>这是生成主干的直接输出头。它把 Transformer hidden states 投影回 shape latent 的通道维度，输出 denoising 预测。注意：这里仍然是 latent 空间，不是 mesh。</p>
+            </article>
+            <article class="mini-card">
+              <h3>组件 B：scheduler</h3>
+              <p>scheduler 决定每一步怎么用 <code class="inline">noise_pred</code> 更新 <code class="inline">latents</code>。没有 scheduler，DiT 的输出只是一步预测，不会形成完整生成轨迹。</p>
+            </article>
+            <article class="mini-card">
+              <h3>组件 C：ShapeVAE.forward</h3>
+              <p>采样结束后，latent 先经过 <code class="inline">post_kl</code> 和 VAE 内部 Transformer，变成几何 decoder 能使用的 latent 表示。</p>
+            </article>
+            <article class="mini-card">
+              <h3>组件 D：volume decoder + surface extractor</h3>
+              <p><code class="inline">latents2mesh()</code> 先用 volume decoder 得到 <code class="inline">grid_logits</code>，再用 marching cubes / surface extractor 抽取三角网格表面，最终得到 <code class="inline">trimesh</code>。</p>
+            </article>
+          </div>
+
+          <pre><code>一句话流程：
+CLIP/DINO ViT encoder：2D 图片 -> 条件 token
+Hunyuan3D-DiT：noisy shape latent + 条件 token + timestep -> latent 更新量
+Scheduler：多步更新 latent
+ShapeVAE：latent -> volume field
+Surface extractor：volume field -> mesh
+Paint pipeline：mesh + 图片 -> UV texture -> textured mesh / GLB</code></pre>
+
+          <div class="callout">最短总结：<strong>用的是 DiT 做生成，ViT/CLIP/DINO 主要做图片条件编码。</strong>它和 LLM 最大区别是：LLM 输出离散 token 概率；混元3D 输出连续 3D latent 的去噪方向，最后靠 VAE 和 surface extraction 才变成真正的 3D 模型。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py:270-410</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/conditioner.py:57-150</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/conditioner.py:204-257</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:473-488</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:740-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:650-668</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:158-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:246-282</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
