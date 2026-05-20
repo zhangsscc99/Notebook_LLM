@@ -1004,13 +1004,14 @@
         <details class="toc-group" id="hunyuan3dTocGroup" open>
           <summary>
             <span class="toc-group-title">混元3D</span>
-            <span class="toc-count">4 sections</span>
+            <span class="toc-count">5 sections</span>
           </summary>
           <div class="toc-group-links">
             <a href="#hunyuan3d-project-overview">01 · 概览介绍 Hunyuan3D-2 项目</a>
             <a href="#hunyuan3d-view-consistency">02 · 混元3D 是怎么确保生成的 3D 模型每个视角都一致的</a>
             <a href="#hunyuan3d-training-view-consistency">03 · 训练阶段怎么让 2D 输入学会生成多视角一致的 3D</a>
             <a href="#hunyuan3d-dit-vit-llm-output">04 · 项目用的是 DiT 还是 ViT，和 LLM 的输出原理有什么不同</a>
+            <a href="#hunyuan3d-training-data-latents">05 · 训练时输入是图片输出是 latents 吗，训练数据集怎么构造</a>
           </div>
         </details>
         <details class="toc-group" id="algorithmBasicsTocGroup" open>
@@ -7216,6 +7217,96 @@ Paint pipeline：mesh + 图片 -> UV texture -> textured mesh / GLB</code></pre>
 
           <div class="callout">最短总结：<strong>用的是 DiT 做生成，ViT/CLIP/DINO 主要做图片条件编码。</strong>它和 LLM 最大区别是：LLM 输出离散 token 概率；混元3D 输出连续 3D latent 的去噪方向，最后靠 VAE 和 surface extraction 才变成真正的 3D 模型。</div>
           <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py:270-410</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/conditioner.py:57-150</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/conditioner.py:204-257</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:473-488</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:740-770</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/pipelines.py:650-668</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:158-176</code>、<code class="inline">/root/Hunyuan3D-2/hy3dgen/shapegen/models/autoencoders/model.py:246-282</code>。</div>
+        </section>
+
+        <section class="section reveal" id="hunyuan3d-training-data-latents">
+          <div class="section-header"><div class="index">HY3D5</div><h2>训练时输入是图片输出是 latents 吗，训练数据集怎么构造</h2></div>
+          <p>你的猜法<strong>大方向是对的</strong>：训练数据确实可以理解成“一个真实 3D 模型生成多张 2D 渲染图作为条件输入，同时这个 3D 模型对应的完整几何 latent 作为监督来源”。但有一个关键修正：<strong>DiT 训练时不是直接输出 clean latent，而是输出 flow matching / diffusion 的 velocity 或 noise 目标；clean latent 是用来构造训练目标的。</strong></p>
+          <div class="callout"><strong>一句话：</strong>训练样本不是“图片 → 直接回归 latent”这么简单，而是“2D 渲染图做条件，3D surface 经 ShapeVAE encode 得到 clean latent；训练时给 clean latent 加噪成 noisy latent，DiT 输入 noisy latent + timestep + 图片条件，输出 velocity/noise 预测，用 MSE 对齐目标”。</div>
+
+          <p>这次我看了 Hunyuan3D-2.1 的训练代码，源码已经把数据组织方式写得很直接：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>每个样本目录对应一个 3D asset。</strong><code class="inline">AlignedShapeLatentDataset.decode()</code> 里把 <code class="inline">item</code> 当成一个资产目录，取 <code class="inline">uid = item.split('/')[-1]</code>。</div>
+            <div class="flow-step" data-step="2"><strong>一个 asset 有 24 张条件渲染图。</strong>源码构造 <code class="inline">render_cond/{i:03d}.png</code>，范围是 <code class="inline">i in range(24)</code>。这正是你说的“一个 3D 模型搞多组训练数据”。</div>
+            <div class="flow-step" data-step="3"><strong>同一个 asset 有完整几何数据。</strong>源码读取 <code class="inline">geo_data/{uid}_surface.npz</code>，里面取 <code class="inline">random_surface</code> 和 <code class="inline">sharp_surface</code>。这代表完整 3D 几何采样，不是某一张 2D 图。</div>
+            <div class="flow-step" data-step="4"><strong>每次训练随机选一个视角。</strong><code class="inline">load_render()</code> 里用 <code class="inline">self.rng.sample(imgs_path, 1)</code> 从 24 张渲染图里抽一张作为本次条件图。</div>
+            <div class="flow-step" data-step="5"><strong>dataset 返回 image + surface。</strong><code class="inline">transform()</code> 最后返回 <code class="inline">surface</code>、<code class="inline">image</code>、<code class="inline">mask</code>。所以训练 batch 里同时有 2D 条件图和 3D 几何监督。</div>
+          </div>
+
+          <pre><code>Hunyuan3D-2.1 数据目录概念：
+asset_uid/
+  render_cond/
+    000.png
+    001.png
+    ...
+    023.png          # 同一个 3D asset 的 24 个条件视角
+  geo_data/
+    asset_uid_surface.npz
+      random_surface # 3D 表面点/法线等
+      sharp_surface  # 锐边表面点等
+
+训练时一次 sample 大概取：
+  image = 随机一张 render_cond/*.png
+  surface = 同一个 asset 的完整 3D surface 数据</code></pre>
+
+          <p>然后模型训练阶段怎么用这些数据？源码 <code class="inline">Diffuser.forward()</code> 里是这条链：</p>
+          <div class="flow">
+            <div class="flow-step" data-step="1"><strong>图片进入条件编码器。</strong><code class="inline">contexts = self.cond_stage_model(image=batch.get('image'), ...)</code>。配置里 cond stage 是 <code class="inline">SingleImageEncoder</code>，主 image encoder 是 <code class="inline">DinoImageEncoder</code>，也就是用 DINOv2 Large 编码 2D 图片。</div>
+            <div class="flow-step" data-step="2"><strong>surface 进入 ShapeVAE。</strong><code class="inline">latents = self.first_stage_model.encode(batch[self.first_stage_key], sample_posterior=True)</code>。配置里 <code class="inline">first_stage_key='surface'</code>，所以 clean latent 来自完整 3D surface，而不是来自 2D 图。</div>
+            <div class="flow-step" data-step="3"><strong>latent 做 scale。</strong><code class="inline">latents = self.z_scale_factor * latents</code>，把 ShapeVAE latent 调到训练使用的尺度。</div>
+            <div class="flow-step" data-step="4"><strong>transport 构造 flow matching 训练目标。</strong><code class="inline">self.transport.training_losses(self.model, latents, dict(contexts=contexts))</code> 内部把 clean latent 当 <code class="inline">x1</code>，采样噪声 <code class="inline">x0</code> 和时间 <code class="inline">t</code>，得到 noisy/interpolated latent <code class="inline">xt</code> 以及目标 velocity <code class="inline">ut</code>。</div>
+            <div class="flow-step" data-step="5"><strong>DiT 预测 velocity/noise 目标。</strong><code class="inline">model_output = model(xt, t, contexts=contexts)</code>，然后如果 model type 是 velocity，就用 <code class="inline">(model_output - ut)^2</code> 做 loss。</div>
+          </div>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>所以“输入是图片，输出是 latent”对不对</h3>
+              <p><strong>口语上可以这么理解，但严格讲不对。</strong>严格训练输入是：<code class="inline">noisy latent xt + timestep t + image condition</code>；训练输出是：<code class="inline">velocity/noise prediction</code>；clean shape latent 是监督数据，用来生成 <code class="inline">xt</code> 和目标 <code class="inline">ut</code>。</p>
+            </article>
+            <article class="mini-card">
+              <h3>clean latent 从哪里来</h3>
+              <p>不是数据集直接读一个 latent 文件，而是训练时用 frozen <code class="inline">ShapeVAE.encode(surface)</code> 从完整 3D surface 编码出来。配置里 <code class="inline">first_stage_config</code> 指向 <code class="inline">ShapeVAE</code>，并从 <code class="inline">tencent/Hunyuan3D-2.1</code> 加载。</p>
+            </article>
+            <article class="mini-card">
+              <h3>一个 3D 模型会不会变成多组训练数据</h3>
+              <p><strong>会。</strong>源码每个 asset 目录有 24 个 <code class="inline">render_cond</code> 视角，每次随机抽一张。多轮训练后，同一个 3D surface latent 会配到不同 2D 视角输入。</p>
+            </article>
+            <article class="mini-card">
+              <h3>这是不是在训练多视角对齐能力</h3>
+              <p><strong>是。</strong>因为不同视角图片都对应同一个 3D 几何监督，模型被迫学习“同一个物体从不同角度看，应该还原到同一个完整 3D latent”。这就是训练阶段多视角一致性的核心来源之一。</p>
+            </article>
+          </div>
+
+          <p>把你说的猜想改成更严格版本：</p>
+          <pre><code>你的说法：
+真实 3D 模型 -> 转换成 latents 作为输出
+同一 3D 模型 -> 多视角渲染 2D 图片作为输入
+这样训练多视角对齐能力
+
+更严格源码版：
+真实 3D 模型 -> 预处理成 surface.npz
+训练时 ShapeVAE.encode(surface) -> clean shape latent x1
+同一 3D 模型 -> render_cond/000..023.png
+每次随机取一张 image -> DINO/conditioner -> contexts
+flow matching: sample noise x0, timestep t, interpolate 得到 xt 和 velocity target ut
+DiT 输入 xt + t + contexts，输出 model_output
+loss = MSE(model_output, ut)
+
+所以 clean latent 是监督来源，不是 DiT 直接回归的最终输出。</code></pre>
+
+          <div class="grid-2">
+            <article class="mini-card">
+              <h3>为什么这能学到背面</h3>
+              <p>假设同一个椅子 asset 有正面、侧面、背面渲染图。训练时正面图、侧面图、背面图都能对应同一个完整 3D surface latent。模型就会学到：看到正面时，也要生成一个完整椅子，而不是只生成正面薄片。</p>
+            </article>
+            <article class="mini-card">
+              <h3>为什么这不是“真实单图重建”</h3>
+              <p>单张图的不可见区域仍然不唯一。训练让模型学到从可见图到完整 3D 的条件分布和类别先验，不代表推理时能知道真实背面，只能生成训练分布下合理一致的背面。</p>
+            </article>
+          </div>
+
+          <div class="callout">最短结论：<strong>你的理解基本正确，但要把“输出 latent”改成“用真实 3D 生成 clean latent 作为 diffusion/flow 监督”。</strong>数据集确实是一份 3D asset 派生多张 2D 条件渲染图；这种设计让模型在训练阶段学到视角不变性和多视角一致性。</div>
+          <div class="refs">参考源码：<code class="inline">/root/Hunyuan3D-2.1</code>，commit <code class="inline">82920d6</code>。关键文件：<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/configs/hunyuandit-finetuning-flowmatching-dinol518-bf16-lr1e5-4096.yaml</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/data/dit_asl.py:133-285</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/flow_matching_sit.py:256-289</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/diffusion/transport/transport.py:158-183</code>、<code class="inline">/root/Hunyuan3D-2.1/hy3dshape/hy3dshape/models/autoencoders/model.py:324-334</code>。</div>
         </section>
 
         <section class="section reveal" id="algorithm-embedding-reranker">
